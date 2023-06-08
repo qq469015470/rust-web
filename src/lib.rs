@@ -1,56 +1,4 @@
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn set_and_get_val() {
-        let mut json = crate::web::Json::new(crate::web::JsonType::Object(Default::default()));
-
-        json.set_val("asd", crate::web::Json::new(crate::web::JsonType::i64(123)));
-
-        assert_eq!(i64::from(json.get_val("asd")), 123);
-    }
-
-    #[test]
-    #[should_panic]
-    fn get_null_val() {
-        let mut json = crate::web::Json::new(crate::web::JsonType::Null);
-
-        json.get_val("asd"); 
-    }
-
-    #[test]
-    fn parse_json() {
-        let json_str = " { \"a\": 123, \"fgfgfg\": 444.2, \"complex\": { \"son\": 123}, \"c\": \"aaad\" } ";
-        let mut json = crate::web::Json::parse(json_str).unwrap();
-
-        println!("test_display:\n{}", json);
-
-        assert_eq!(i64::from(json.get_val("a")), 123);
-    }
-
-    #[test]
-    fn parse_complex_json() {
-        let json_str = " { \"a\": 123, \"c\": \"a\\\"ha\\\"aad\", \"fgfgfg\": 444.2, \"complex\": { \"son\": 123}, \"zzz\": null} ";
-        println!("the json:\n{}", json_str);
-        println!("laala:'{}'", "\"");
-        let mut json = crate::web::Json::parse(json_str).unwrap();
-
-        println!("test_display:\n{}", json);
-
-        assert_eq!(String::from(json.get_val("c")), "a\"ha\"aad");
-    }
-
-    #[test]
-    fn null_json() {
-        let json_str = "null";
-
-        let mut json = crate::web::Json::parse(json_str).unwrap();
-        
-        println!("test_display:\n{}", json);
-        assert_eq!("null", String::from(json.get()));
-    }
-}
-
-mod web {
+pub mod web {
     #[derive(PartialEq)]
     #[derive(Debug)]
     #[allow(non_camel_case_types)]
@@ -82,8 +30,8 @@ mod web {
         }
     }
 
-    impl From<&mut JsonType> for String {
-        fn from(item: &mut JsonType) -> Self {
+    impl From<&JsonType> for String {
+        fn from(item: &JsonType) -> Self {
             match item {
                 JsonType::String(val) => val.to_string(),
                 JsonType::Null => "null".to_string(),
@@ -357,5 +305,57 @@ mod web {
 
             return Ok(result.pop_back().unwrap());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn set_and_get_val() {
+        let mut json = crate::web::Json::new(crate::web::JsonType::Object(Default::default()));
+
+        json.set_val("asd", crate::web::Json::new(crate::web::JsonType::i64(123)));
+
+        assert_eq!(i64::from(json.get_val("asd")), 123);
+    }
+
+    #[test]
+    #[should_panic]
+    fn get_null_val() {
+        let mut json = crate::web::Json::new(crate::web::JsonType::Null);
+
+        json.get_val("asd"); 
+    }
+
+    #[test]
+    fn parse_json() {
+        let json_str = " { \"a\": 123, \"fgfgfg\": 444.2, \"complex\": { \"son\": 123}, \"c\": \"aaad\" } ";
+        let mut json = crate::web::Json::parse(json_str).unwrap();
+
+        println!("test_display:\n{}", json);
+
+        assert_eq!(i64::from(json.get_val("a")), 123);
+    }
+
+    #[test]
+    fn parse_complex_json() {
+        let json_str = " { \"a\": 123, \"c\": \"a\\\"ha\\\"aad\", \"fgfgfg\": 444.2, \"complex\": { \"son\": 123}, \"zzz\": null} ";
+        println!("the json:\n{}", json_str);
+        println!("laala:'{}'", "\"");
+        let mut json = crate::web::Json::parse(json_str).unwrap();
+
+        println!("test_display:\n{}", json);
+
+        assert_eq!(String::from(&*json.get_val("c")), "a\"ha\"aad");
+    }
+
+    #[test]
+    fn null_json() {
+        let json_str = "null";
+
+        let mut json = crate::web::Json::parse(json_str).unwrap();
+        
+        println!("test_display:\n{}", json);
+        assert_eq!("null", String::from(&*json.get()));
     }
 }
