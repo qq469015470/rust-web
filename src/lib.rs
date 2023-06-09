@@ -1,4 +1,6 @@
 pub mod web {
+    use std::io::Read;
+
     #[derive(PartialEq)]
     #[derive(Debug)]
     #[allow(non_camel_case_types)]
@@ -81,7 +83,9 @@ pub mod web {
 
     impl Json {
         pub fn new(val: JsonType) -> Self {
-            return Json { val: Box::new(val) };
+            Self { 
+                val: Box::new(val) 
+            }
         }
 
         pub fn set_val<T: Into<String>>(&mut self, key: T, val: Json) {
@@ -306,10 +310,196 @@ pub mod web {
             return Ok(result.pop_back().unwrap());
         }
     }
+
+    #[derive(Debug)]
+    #[derive(Default)]
+    pub struct HttpRequest {
+        method: String,
+        uri: String,
+        version: String,
+        header: std::collections::HashMap<String, String>,
+    }
+
+    impl HttpRequest {
+        pub fn new() -> Self{
+            return Default::default(); 
+        }
+
+        pub fn set_method<T: Into<String>>(&mut self, method: T) {
+            self.method = method.into(); 
+        }
+
+        pub fn set_uri<T: Into<String>>(&mut self, uri: T) {
+            self.uri = uri.into();
+        }
+
+        pub fn set_version<T: Into<String>>(&mut self, version: T) {
+            self.version = version.into();
+        }
+
+        pub fn insert_header<K: Into<String>, V: Into<String>>(&mut self, key: K, val: V) {
+            self.header.insert(key.into().to_lowercase(), val.into());
+        }
+
+        pub fn get_header(&self, key: &str) -> Option<&String> {
+            self.header.get(&key.to_lowercase())
+        }
+
+        pub fn get_body_len(&self) -> Result<usize, <usize as std::str::FromStr>::Err> {
+            if let Some(body_len_str) = self.get_header("content-length") {
+                let body_len = body_len_str.parse::<usize>()?;
+                Ok(body_len)
+            }
+            else {
+                Ok(0)
+            }
+        }
+    }
+
+    pub struct HttpServer {
+        socket: std::net::TcpListener,
+    }
+
+    impl HttpServer {
+        fn handle_accept(mut stream: std::net::TcpStream) -> Result<HttpRequest, Box<dyn std::error::Error>> {
+            #[derive(Debug)]
+            #[derive(PartialEq)]
+            enum HttpState {
+                Method,
+                URI,
+                Version,
+                Header,
+                Body,
+                End,
+            }
+
+            let mut cur_state = HttpState::Method;
+            let mut cache = String::new();
+            let mut http_request = HttpRequest::new();
+            
+            while cur_state != HttpState::End {
+                let mut buf = [0u8; 1024];
+                let buf_size = stream.read(&mut buf)?;
+
+                if buf_size != 0 {
+                    cache += String::from_utf8(buf[0..buf_size].to_vec()).unwrap().as_str();
+                }
+                else {
+                    break;
+                }
+                
+                //print!("{}", c); 
+
+                while cache.len() > 0 {
+                    println!("cur_state:{:#?}", cur_state);
+                    println!("cache_size:[{}]", cache.len());
+                    for c in cache.chars() {
+                        println!("cache:[{}] as u8: [{}]", c, c as u8);
+                    }
+                    
+                    match cur_state {
+                        HttpState::Method => {
+                            if let Some(pos) = cache.find(' ') {
+                                http_request.set_method(&cache[..pos]);
+                                cur_state = HttpState::URI;
+                                cache = cache[pos + 1 ..].to_string();
+                            }
+                        },
+                        HttpState::URI => {
+                            if let Some(pos) = cache.find(' ') {
+                                http_request.set_uri(&cache[..pos]);
+                                cur_state = HttpState::Version;
+                                cache = cache[pos + 1 ..].to_string();
+                            }
+                        },
+                        HttpState::Version => {
+                            if let Some(pos) = cache.find("\r\n") {
+                                http_request.set_version(&cache[..pos]);
+                                cur_state = HttpState::Header;
+                                cache = cache[pos + 2 ..].to_string();
+                            }
+                        },
+                        HttpState::Header => {
+                            if let Some(pos) = cache.find("\r\n") {
+                                if pos == 0 {
+                                    let body_len = http_request.get_body_len()?;
+                                    if body_len > 0 {
+                                        cur_state = HttpState::Body; 
+                                    }
+                                    else {
+                                        cur_state = HttpState::End;
+                                    }
+
+                                    cache = cache[2..].to_string();
+                                }
+                                else if let Some(key_pos) = cache.find(':') {
+                                    http_request.insert_header(cache[0..key_pos].trim(), cache[key_pos + 1..pos].trim());
+                                    cache = cache[pos + 2 ..].to_string();
+                                }
+                                else {
+                                    panic!("header not correct");
+                                }
+                            } 
+                            else {
+                                    panic!("header not correct");
+                            }
+                        },
+                        HttpState::Body => {
+                            println!("in body");
+                            cache.clear();
+                            break;
+                        },
+                        HttpState::End => {
+                            panic!("should not in here");
+                        }
+                    }
+                }
+
+                println!("read({}):", buf_size);
+            }
+
+            
+            println!("{:#?}", http_request);
+
+            println!("finish!!!!!!!!!!!!");
+
+            Ok(http_request)
+        }
+
+        pub fn new(ip_addr: &str) -> Result<Self, std::io::Error> {
+            let bind_res = std::net::TcpListener::bind(ip_addr); 
+            match bind_res {
+                Ok(val) => { 
+                    Ok(
+                        Self {
+                            socket: val,
+                        }
+                    )
+                },
+                Err(e) => Err(e),
+            }
+        }
+
+        pub fn listen(&self) -> Result<&Self, Box<dyn std::error::Error>> {
+            println!("incoming...");
+            for stream_res in self.socket.incoming() {
+                match stream_res {
+                   Ok(stream) => {
+                       Self::handle_accept(stream)?;
+                   },
+                   Err(e) => {
+                        return Err(Box::new(e)) 
+                   }
+                }
+            }
+
+            Ok(self)
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {
+mod web_tests {
     #[test]
     fn set_and_get_val() {
         let mut json = crate::web::Json::new(crate::web::JsonType::Object(Default::default()));
@@ -357,5 +547,24 @@ mod tests {
         
         println!("test_display:\n{}", json);
         assert_eq!("null", String::from(&*json.get()));
+    }
+}
+
+#[cfg(test)]
+mod server_tests {
+     
+    #[test]
+    fn listen() {
+        let server_res = crate::web::HttpServer::new("0.0.0.0:9999");
+        match server_res {
+            Ok(server) => {
+                if let Err(e) = server.listen() {
+                    panic!("{}", e);
+                }
+            },
+            Err(err_info) => {
+                panic!("{}", err_info);
+            }
+        }
     }
 }
