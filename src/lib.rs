@@ -1,5 +1,29 @@
 pub mod web {
-    use std::io::Read;
+    //use std::io::Read;
+    //use std::io::Write;
+  	use async_std::stream::StreamExt;   
+	use async_std::io::ReadExt;
+	use async_std::io::WriteExt;
+
+	#[derive(Debug)]
+	pub struct BacktraceError {
+		err_info: String,
+	}
+
+	impl std::fmt::Display for BacktraceError {
+		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+			write!(f, "{}", self.err_info)
+		}	
+	}
+	
+	impl<E> From<E> for BacktraceError
+where
+    E: std::error::Error {
+		fn from(err: E) -> BacktraceError {
+			let backtrace = format!("Error Description:{}\r\n{}", err.description() ,std::backtrace::Backtrace::force_capture());
+			Self{err_info: backtrace}
+		}
+}
 
     #[derive(PartialEq)]
     #[derive(Debug)]
@@ -356,12 +380,118 @@ pub mod web {
         }
     }
 
+    #[derive(Copy, Clone)]
+    pub enum HttpResponseStatusCode {
+        OK = 200,
+        NotFound = 404,
+        InternalServerError = 500,
+    }
+
+    pub struct HttpResponse {
+        version: String, 
+        status_code: HttpResponseStatusCode,
+        header: std::collections::HashMap<String, String>,  
+        body: std::vec::Vec::<u8>,
+    }
+
+    impl HttpResponse {
+        pub fn new(code: HttpResponseStatusCode,) -> Self {
+            Self { 
+                version: String::from("HTTP/1.1"), 
+                status_code: code,
+                header: Default::default(),
+                body: Default::default(),
+            }
+        }
+
+        pub fn get_status_code(&self) -> HttpResponseStatusCode {
+            self.status_code
+        }
+
+        pub fn insert_header<K: Into<String>, V: Into<String>>(&mut self, key: K, val: V) {
+            self.header.insert(key.into().to_lowercase(), val.into());
+        }
+
+        pub fn get_header(&self) -> std::collections::hash_map::Iter<String, String> {
+            self.header.iter()
+        }
+
+        pub fn set_body(&mut self, body_byte: std::vec::Vec::<u8>) {
+            self.body = body_byte;
+            self.insert_header("content-length", self.body.len().to_string());
+        }
+
+        pub fn get_body(&self) -> &std::vec::Vec::<u8> {
+            &self.body
+        }
+
+        pub fn get_version(&self) -> &str {
+            self.version.as_str()
+        } 
+    }
+
     pub struct HttpServer {
-        socket: std::net::TcpListener,
+        socket: async_std::net::TcpListener,
     }
 
     impl HttpServer {
-        fn handle_accept(mut stream: std::net::TcpStream) -> Result<HttpRequest, Box<dyn std::error::Error>> {
+        async fn send_response(mut stream: &async_std::net::TcpStream, response: &HttpResponse) -> Result<(), BacktraceError> {
+            let head_content = format!
+                                (
+                                    "{version} {status_code}\r\n{header}\r\n", 
+                                    version = response.get_version(), 
+                                    status_code = response.get_status_code() as u8,
+                                    header = (|| {
+                                        let mut result = String::new();
+                                        for (key, val) in response.get_header() {
+                                            result += format!("{}: {}\r\n", key, val).as_str();
+                                        }
+
+                                        return result;
+                                    })()
+                                );
+
+            let wait_write = vec![head_content.as_bytes(), response.get_body()];
+            for cur_buf in wait_write {
+                stream.write_all(cur_buf).await?; //{
+			//		Ok(_) => (),
+			//		Err(e) => {
+			//			if e.kind() != std::io::ErrorKind::BrokenPipe {
+			//				panic!("{}", e);
+			//			}
+			//			
+			//			return Err(e.into());
+			//		}
+			//	}
+                //let mut write_len = 0usize;
+                //while write_len < cur_buf.len() {
+                //    match stream.write(&cur_buf[write_len..]) {
+                //        Ok(len) => {
+                //            write_len += len;
+                //        },
+                //        Err(e) => {
+                //            if e.kind() != std::io::ErrorKind::BrokenPipe { return Err(Box::from(e));}
+                //            else { return Ok(()); }
+                //        }
+                //    }
+                //}
+            }
+            stream.flush().await.unwrap();
+
+            Ok(())
+        }
+
+        fn handle_request(request: &HttpRequest) -> Result<HttpResponse, BacktraceError> {
+            let mut response = HttpResponse::new(HttpResponseStatusCode::OK);
+
+            response.insert_header("content-type", "text/html; charset=UTF-8");
+            response.insert_header("connection", "close");
+            response.set_body("中文测试!!♥".into());
+
+            Ok(response)
+        }
+
+        async fn handle_accept(mut stream: &async_std::net::TcpStream) -> Result<HttpRequest, BacktraceError> {
             #[derive(Debug)]
             #[derive(PartialEq)]
             enum HttpState {
@@ -379,24 +509,14 @@ pub mod web {
             
             while cur_state != HttpState::End {
                 let mut buf = [0u8; 1024];
-                let buf_size = stream.read(&mut buf)?;
+                let buf_size = stream.read(&mut buf).await?;
 
-                if buf_size != 0 {
-                    cache += String::from_utf8(buf[0..buf_size].to_vec()).unwrap().as_str();
-                }
-                else {
-                    break;
-                }
+                assert!(buf_size > 0);
+                cache += String::from_utf8(buf[0..buf_size].to_vec()).unwrap().as_str();
                 
                 //print!("{}", c); 
 
                 while cache.len() > 0 {
-                    println!("cur_state:{:#?}", cur_state);
-                    println!("cache_size:[{}]", cache.len());
-                    for c in cache.chars() {
-                        println!("cache:[{}] as u8: [{}]", c, c as u8);
-                    }
-                    
                     match cur_state {
                         HttpState::Method => {
                             if let Some(pos) = cache.find(' ') {
@@ -445,9 +565,8 @@ pub mod web {
                             }
                         },
                         HttpState::Body => {
-                            println!("in body");
-                            cache.clear();
-                            break;
+                            println!("in body:{}", cache);
+                            cur_state = HttpState::End;
                         },
                         HttpState::End => {
                             panic!("should not in here");
@@ -455,19 +574,18 @@ pub mod web {
                     }
                 }
 
-                println!("read({}):", buf_size);
             }
 
             
-            println!("{:#?}", http_request);
+            //println!("{:#?}", http_request);
 
-            println!("finish!!!!!!!!!!!!");
+            //println!("finish!!!!!!!!!!!!");
 
             Ok(http_request)
         }
 
-        pub fn new(ip_addr: &str) -> Result<Self, std::io::Error> {
-            let bind_res = std::net::TcpListener::bind(ip_addr); 
+        pub async fn new(ip_addr: &str) -> Result<Self, BacktraceError> {
+            let bind_res = async_std::net::TcpListener::bind(ip_addr).await; 
             match bind_res {
                 Ok(val) => { 
                     Ok(
@@ -476,24 +594,38 @@ pub mod web {
                         }
                     )
                 },
-                Err(e) => Err(e),
+                Err(e) => Err(e.into()),
             }
         }
 
-        pub fn listen(&self) -> Result<&Self, Box<dyn std::error::Error>> {
+        async fn accept_process(stream: async_std::net::TcpStream) -> Result<(), BacktraceError> {
+            println!("accept_process...");
+            
+            let request = Self::handle_accept(&stream).await?;
+            let response = Self::handle_request(&request).unwrap();
+            Self::send_response(&stream, &response).await?;
+
+            Ok(())
+        }
+
+        pub async fn listen(&mut self) -> Result<(), BacktraceError> { 
             println!("incoming...");
-            for stream_res in self.socket.incoming() {
+            while let Some(stream_res) = self.socket.incoming().next().await {			
                 match stream_res {
                    Ok(stream) => {
-                       Self::handle_accept(stream)?;
+						let handle = async_std::task::spawn(async {
+                        	if let Err(e) = Self::accept_process(stream).await {
+								println!("{}", e);
+							}
+						});
                    },
                    Err(e) => {
-                        return Err(Box::new(e)) 
+                        return Err(e.into());
                    }
                 }
             }
 
-            Ok(self)
+            Ok(())
         }
     }
 }
@@ -548,6 +680,7 @@ mod web_tests {
         println!("test_display:\n{}", json);
         assert_eq!("null", String::from(&*json.get()));
     }
+
 }
 
 #[cfg(test)]
@@ -555,10 +688,10 @@ mod server_tests {
      
     #[test]
     fn listen() {
-        let server_res = crate::web::HttpServer::new("0.0.0.0:9999");
+        let server_res = async_std::task::block_on(crate::web::HttpServer::new("0.0.0.0:9999"));
         match server_res {
-            Ok(server) => {
-                if let Err(e) = server.listen() {
+            Ok(mut server) => {  
+                if let Err(e) = async_std::task::block_on(server.listen()) {
                     panic!("{}", e);
                 }
             },
