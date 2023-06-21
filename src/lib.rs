@@ -5,32 +5,40 @@ pub mod web {
 	use async_std::io::ReadExt;
 	use async_std::io::WriteExt;
     
-    pub fn urldecode(content: &str) -> String {
+    pub fn urldecode(content: &str) -> Result<String, BacktraceError> {
     	let mut result = std::string::String::new();
 
 		let mut i: usize = 0;
+		let mut unicode = std::vec::Vec::<u8>::new(); 
 		while i < content.chars().count() {
 			let c = content.chars().nth(i).unwrap();
 			if c == '%' {
-				let mut unicode:[u8; 3] = [0; 3]; 
-				for j in 0..3 {
-					let code:&str = &content[(i + j * 3) + 1..(i + j * 3) + 3];
-					unicode[j] = u8::from_str_radix(code, 16).unwrap();
-				}
-				result += std::str::from_utf8(&unicode).unwrap();
-				i += 3 * 3;
+				let code:&str = &content[i + 1..i + 3];
+				unicode.push(u8::from_str_radix(code, 16)?);
+				i += 3;
 			}
-			else if c == '+' {
-				result.push(' ');
-				i += 1;
-			}
-			else {
-				result.push(c);
-				i += 1;
-			}
+            else {
+                if unicode.len() > 0 {
+				    result += std::str::from_utf8(&unicode)?;
+                    unicode.clear(); 
+                }
+
+			    if c == '+' {
+			    	result.push(' ');
+			    	i += 1;
+			    }
+			    else {
+			    	result.push(c);
+			    	i += 1;
+			    }
+            }
 		}
 
-		return result;
+        if unicode.len() > 0 {
+			result += std::str::from_utf8(&unicode)?;
+        }
+
+		Ok(result)
     }
 
 	#[derive(Debug)]
@@ -718,7 +726,7 @@ pub mod web {
                             }
                         },
                         HttpState::Body => {
-                            println!("in body:{}", urldecode(std::str::from_utf8(cache.as_slice())?));
+                            println!("in body:{}", urldecode(std::str::from_utf8(cache.as_slice())?)?);
                             let mut old_body: std::vec::Vec<u8> = http_request.get_body().clone();
                             old_body.append(&mut cache);
                             http_request.set_body(&mut old_body);
@@ -890,10 +898,10 @@ mod json_tests {
 mod urldecode {
 	#[test]
 	fn test_decode() {
-		let code = "name=123&aaa=444&www=%E4%B8%AD%E6%96%87test";
+		let code = "name=123&aaa=444&www=%E4%B8%AD%E6%96%87test%F0%9F%92%96";
 		
 		let result = crate::web::urldecode(code);
-		assert_eq!("name=123&aaa=444&www=中文test", result);
+		assert_eq!("name=123&aaa=444&www=中文test💖", result.unwrap());
 	}
 }
 
