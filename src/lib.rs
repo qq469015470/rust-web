@@ -4,6 +4,34 @@ pub mod web {
   	use async_std::stream::StreamExt;   
 	use async_std::io::ReadExt;
 	use async_std::io::WriteExt;
+    
+    pub fn urldecode(content: &str) -> String {
+    	let mut result = std::string::String::new();
+
+		let mut i: usize = 0;
+		while i < content.chars().count() {
+			let c = content.chars().nth(i).unwrap();
+			if c == '%' {
+				let mut unicode:[u8; 3] = [0; 3]; 
+				for j in 0..3 {
+					let code:&str = &content[(i + j * 3) + 1..(i + j * 3) + 3];
+					unicode[j] = u8::from_str_radix(code, 16).unwrap();
+				}
+				result += std::str::from_utf8(&unicode).unwrap();
+				i += 3 * 3;
+			}
+			else if c == '+' {
+				result.push(' ');
+				i += 1;
+			}
+			else {
+				result.push(c);
+				i += 1;
+			}
+		}
+
+		return result;
+    }
 
 	#[derive(Debug)]
 	pub struct BacktraceError {
@@ -690,7 +718,7 @@ pub mod web {
                             }
                         },
                         HttpState::Body => {
-                            println!("in body:{}", std::str::from_utf8(cache.as_slice())?);
+                            println!("in body:{}", urldecode(std::str::from_utf8(cache.as_slice())?));
                             let mut old_body: std::vec::Vec<u8> = http_request.get_body().clone();
                             old_body.append(&mut cache);
                             http_request.set_body(&mut old_body);
@@ -856,6 +884,17 @@ mod json_tests {
 
         assert_eq!(crate::web::JsonType::i64(789), *json.index(2).get_val("a"));
     }
+}
+
+#[cfg(test)]
+mod urldecode {
+	#[test]
+	fn test_decode() {
+		let code = "name=123&aaa=444&www=%E4%B8%AD%E6%96%87test";
+		
+		let result = crate::web::urldecode(code);
+		assert_eq!("name=123&aaa=444&www=中文test", result);
+	}
 }
 
 #[cfg(test)]
