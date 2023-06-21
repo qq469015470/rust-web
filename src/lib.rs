@@ -549,9 +549,10 @@ pub mod web {
     }
 
     type WebFunc = dyn Fn(Json) -> HttpResponse;
+    type RouterLink = std::collections::HashMap<String, Box<WebFunc>>;
     #[derive(Default)]
     pub struct Router {
-        routes: std::collections::HashMap<String, Box<WebFunc>>,
+        routes: std::collections::HashMap<String, RouterLink>,
     }
 
     impl Router {
@@ -561,12 +562,18 @@ pub mod web {
             }
         }
 
-        pub fn register_url<F: Fn(Json) -> HttpResponse>(&mut self, func: &'static F) {
-            self.routes.insert("asd".to_string(), Box::new(func)); 
+        pub fn register_url<F: Fn(Json) -> HttpResponse>(&mut self, method: String, url: String, func: &'static F) {
+            if let None = self.routes.get_mut(method.as_str()) {
+                self.routes.insert(method.clone(), RouterLink::new());
+            }
+
+            let link = self.routes.get_mut(method.as_str()).unwrap();
+            link.insert(url, Box::new(func));
         }
 
-        pub fn call(&self, url: &str, request: &HttpRequest) {
-            let func = self.routes.get(url).unwrap();
+        pub fn call(&self, method: &str, url: &str, request: &HttpRequest) {
+            let link = self.routes.get(method).unwrap();
+            let func = link.get(url).unwrap();
 
             let json = Json::parse(std::str::from_utf8(request.get_body()).unwrap()).unwrap();
             func(json);
@@ -919,11 +926,11 @@ mod router_tests {
         let mut router = crate::web::Router::new(); 
 
         println!("add:{:p}", &test_response);
-        router.register_url(&test_response);
+        router.register_url("GET".to_string(), "asd".to_string(), &test_response);
 
         let request = crate::web::HttpRequest::new();
 
-        router.call("asd", &request);
+        router.call("GET", "asd", &request);
     }
 }
 
