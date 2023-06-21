@@ -916,7 +916,7 @@ mod urldecode {
 mod router_tests {
 
     fn test_response(param: crate::web::Json) -> crate::web::HttpResponse {
-        println!("test_response!!!");
+        println!("test_response!!!param:{}", param);
 
         return crate::web::HttpResponse::new(crate::web::HttpResponseStatusCode::OK);
     }
@@ -928,7 +928,9 @@ mod router_tests {
         println!("add:{:p}", &test_response);
         router.register_url("GET".to_string(), "asd".to_string(), &test_response);
 
-        let request = crate::web::HttpRequest::new();
+        let mut request = crate::web::HttpRequest::new();
+        request.set_body(&mut "{\"a\": 123123}".as_bytes().to_vec());
+        request.insert_header("content-length", request.get_body().len().to_string());
 
         router.call("GET", "asd", &request);
     }

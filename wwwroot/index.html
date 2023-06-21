@@ -9,10 +9,16 @@
 
 <script>
 	function post() {
-		$.post("/test", {
+		let param =  {
 			name:"123",
 			aaa: 444,
 			www: "中文test💖",
+		};
+		$.ajax({
+			type: 'POST',
+			url: '/test/',
+			dataType: "json",
+			data: JSON.stringify(param),
 		});
 	}
 </script>
