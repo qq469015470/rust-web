@@ -412,6 +412,7 @@ pub mod web {
         uri: String,
         version: String,
         header: std::collections::HashMap<String, String>,
+        body: std::vec::Vec<u8>,
     }
 
     impl HttpRequest {
@@ -443,13 +444,20 @@ pub mod web {
             self.header.get(&key.to_lowercase())
         }
 
-        pub fn get_body_len(&self) -> Result<usize, <usize as std::str::FromStr>::Err> {
-            if let Some(body_len_str) = self.get_header("content-length") {
-                let body_len = body_len_str.parse::<usize>()?;
-                Ok(body_len)
+        pub fn set_body(&mut self, buffer: &mut std::vec::Vec<u8>) {
+            std::mem::swap(&mut self.body, buffer);
+        }
+
+        pub fn get_body(&self) -> &std::vec::Vec<u8> {
+           &self.body
+        }
+
+        pub fn get_body_len(&self) -> usize {
+            if let Some(len_str) = self.get_header("content-length") {
+                return str::parse::<usize>(len_str).unwrap()
             }
             else {
-                Ok(0)
+                return 0;
             }
         }
     }
@@ -504,8 +512,29 @@ pub mod web {
         } 
     }
 
+    type WebFunc = dyn Fn(Json) -> HttpResponse;
+    #[derive(Default)]
     pub struct Router {
+        routes: std::collections::HashMap<String, Box<WebFunc>>,
+    }
 
+    impl Router {
+        pub fn new() -> Self {
+            Self {
+                ..Default::default()
+            }
+        }
+
+        pub fn register_url<F: Fn(Json) -> HttpResponse>(&mut self, func: &'static F) {
+            self.routes.insert("asd".to_string(), Box::new(func)); 
+        }
+
+        pub fn call(&self, url: &str, request: &HttpRequest) {
+            let func = self.routes.get(url).unwrap();
+
+            let json = Json::parse(std::str::from_utf8(request.get_body()).unwrap()).unwrap();
+            func(json);
+        }
     }
     
     pub struct HttpServer {
@@ -594,7 +623,7 @@ pub mod web {
             }
 
             let mut cur_state = HttpState::Method;
-            let mut cache = String::new();
+            let mut cache = std::vec::Vec::<u8>::new();
             let mut http_request = HttpRequest::new();
             
             while cur_state != HttpState::End {
@@ -603,37 +632,42 @@ pub mod web {
                 let buf_size = async_std::io::timeout(std::time::Duration::from_millis(5000), stream.read(&mut buf)).await?;
 
                 assert!(buf_size > 0);
-                cache += String::from_utf8(buf[0..buf_size].to_vec()).unwrap().as_str();
+                //cache += String::from_utf8(buf[0..buf_size].to_vec()).unwrap().as_str();
+                cache.append(&mut buf[0..buf_size].to_vec());
                 
                 //print!("{}", c); 
 
                 while cache.len() > 0 {
                     match cur_state {
                         HttpState::Method => {
-                            if let Some(pos) = cache.find(' ') {
-                                http_request.set_method(&cache[..pos]);
+                            let content = std::str::from_utf8(cache.as_slice())?;
+                            if let Some(pos) = content.find(' ') {
+                                http_request.set_method(&content[..pos]);
                                 cur_state = HttpState::URI;
-                                cache = cache[pos + 1 ..].to_string();
+                                cache = cache[pos + 1 ..].to_vec();
                             }
                         },
                         HttpState::URI => {
-                            if let Some(pos) = cache.find(' ') {
-                                http_request.set_uri(&cache[..pos]);
+                            let content = std::str::from_utf8(cache.as_slice())?;
+                            if let Some(pos) = content.find(' ') {
+                                http_request.set_uri(&content[..pos]);
                                 cur_state = HttpState::Version;
-                                cache = cache[pos + 1 ..].to_string();
+                                cache = cache[pos + 1 ..].to_vec();
                             }
                         },
                         HttpState::Version => {
-                            if let Some(pos) = cache.find("\r\n") {
-                                http_request.set_version(&cache[..pos]);
+                            let content = std::str::from_utf8(cache.as_slice())?;
+                            if let Some(pos) = content.find("\r\n") {
+                                http_request.set_version(&content[..pos]);
                                 cur_state = HttpState::Header;
-                                cache = cache[pos + 2 ..].to_string();
+                                cache = cache[pos + 2 ..].to_vec();
                             }
                         },
                         HttpState::Header => {
-                            if let Some(pos) = cache.find("\r\n") {
+                            let content = std::str::from_utf8(cache.as_slice())?;
+                            if let Some(pos) = content.find("\r\n") {
                                 if pos == 0 {
-                                    let body_len = http_request.get_body_len()?;
+                                    let body_len = http_request.get_body_len();
                                     if body_len > 0 {
                                         cur_state = HttpState::Body; 
                                     }
@@ -641,11 +675,11 @@ pub mod web {
                                         cur_state = HttpState::End;
                                     }
 
-                                    cache = cache[2..].to_string();
+                                    cache = cache[2..].to_vec();
                                 }
-                                else if let Some(key_pos) = cache.find(':') {
-                                    http_request.insert_header(cache[0..key_pos].trim(), cache[key_pos + 1..pos].trim());
-                                    cache = cache[pos + 2 ..].to_string();
+                                else if let Some(key_pos) = content.find(':') {
+                                    http_request.insert_header(content[0..key_pos].trim(), content[key_pos + 1..pos].trim());
+                                    cache = cache[pos + 2 ..].to_vec();
                                 }
                                 else {
                                     panic!("header not correct");
@@ -656,7 +690,10 @@ pub mod web {
                             }
                         },
                         HttpState::Body => {
-                            println!("in body:{}", cache);
+                            println!("in body:{}", std::str::from_utf8(cache.as_slice())?);
+                            let mut old_body: std::vec::Vec<u8> = http_request.get_body().clone();
+                            old_body.append(&mut cache);
+                            http_request.set_body(&mut old_body);
                             cur_state = HttpState::End;
                         },
                         HttpState::End => {
@@ -724,7 +761,7 @@ pub mod web {
 }
 
 #[cfg(test)]
-mod web_tests {
+mod json_tests {
     #[test]
     fn set_and_get_val() {
         let mut json = crate::web::Json::new(crate::web::JsonType::Object(Default::default()));
@@ -822,7 +859,35 @@ mod web_tests {
 }
 
 #[cfg(test)]
+mod router_tests {
+
+    fn test_response(param: crate::web::Json) -> crate::web::HttpResponse {
+        println!("test_response!!!");
+
+        return crate::web::HttpResponse::new(crate::web::HttpResponseStatusCode::OK);
+    }
+
+    #[test]
+    fn call_back_register() {
+        let mut router = crate::web::Router::new(); 
+
+        println!("add:{:p}", &test_response);
+        router.register_url(&test_response);
+
+        let request = crate::web::HttpRequest::new();
+
+        router.call("asd", &request);
+    }
+}
+
+#[cfg(test)]
 mod server_tests {
+    use route_macro_attribute::route;
+
+    #[route(GET, "/")]
+    #[test]
+    fn index() {
+    }
      
     #[test]
     fn listen() {

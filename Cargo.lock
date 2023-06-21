@@ -465,11 +465,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "route_macro_attribute"
+version = "0.1.0"
+
+[[package]]
 name = "rust_web"
 version = "0.1.0"
 dependencies = [
  "async-std",
  "futures",
+ "route_macro_attribute",
 ]
 
 [[package]]
