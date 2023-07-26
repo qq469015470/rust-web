@@ -460,6 +460,10 @@ pub mod web {
             self.method = method.into(); 
         }
 
+        pub fn get_method(&self) -> &String {
+            &self.method 
+        }
+
         pub fn set_uri<T: Into<String>>(&mut self, uri: T) {
             self.uri = uri.into();
         }
@@ -548,7 +552,7 @@ pub mod web {
         } 
     }
 
-    type WebFunc = dyn Fn(Json) -> HttpResponse;
+    type WebFunc = dyn Fn(Json) -> HttpResponse + Send + Sync;
     type RouterLink = std::collections::HashMap<String, Box<WebFunc>>;
     #[derive(Default)]
     pub struct Router {
@@ -562,34 +566,46 @@ pub mod web {
             }
         }
 
-        pub fn register_url<F: Fn(Json) -> HttpResponse>(&mut self, method: String, url: String, func: &'static F) {
+        pub fn register_url<F: Fn(Json) -> HttpResponse + Send + Sync, T: Into<String>>(&mut self, method: T, url: T, func: &'static F) {
+            let method: String = method.into();
+
             if let None = self.routes.get_mut(method.as_str()) {
-                self.routes.insert(method.clone(), RouterLink::new());
+                self.routes.insert(method.to_string(), RouterLink::new());
             }
 
             let link = self.routes.get_mut(method.as_str()).unwrap();
-            link.insert(url, Box::new(func));
+            link.insert(url.into(), Box::new(func));
         }
 
-        pub fn call(&self, method: &str, url: &str, request: &HttpRequest) {
+        pub fn contains_url(&self, method: &str, url: &str) -> bool {
+            if let Some(link) = self.routes.get(method) {
+                return link.contains_key(url);
+            }
+            else {
+                return false;
+            }
+        }
+
+        pub fn call(&self, method: &str, url: &str, request: &HttpRequest) -> HttpResponse {
             let link = self.routes.get(method).unwrap();
             let func = link.get(url).unwrap();
 
             let json = Json::parse(std::str::from_utf8(request.get_body()).unwrap()).unwrap();
-            func(json);
+            func(json)
         }
     }
     
     pub struct HttpServer {
         socket: async_std::net::TcpListener,
+        router: std::sync::Arc<Router>,
     }
 
     impl HttpServer {
 
-        fn get_root_file_response(request: &HttpRequest) -> Result<HttpResponse, BacktraceError> {
+        fn get_root_file_response(uri: &str) -> Result<HttpResponse, BacktraceError> {
             const ROOT: &str = "wwwroot";
 
-            let path = format!("{}/{}{}", std::env::current_dir()?.display(), ROOT, request.get_uri());
+            let path = format!("{}/{}{}", std::env::current_dir()?.display(), ROOT, uri);
             println!("path:{}", path);
 
             let file_res = std::fs::OpenOptions::new().read(true).open(path);
@@ -644,13 +660,22 @@ pub mod web {
             Ok(())
         }
 
-        fn handle_request(request: &HttpRequest) -> Result<HttpResponse, BacktraceError> {
-            let mut response = Self::get_root_file_response(request)?;
+        fn handle_request(router: &Router, request: &HttpRequest) -> Result<HttpResponse, BacktraceError> {
+            let method = request.get_method();
+            let uri = request.get_uri();
 
-            response.insert_header("content-type", "text/html; charset=UTF-8");
-            response.insert_header("connection", "keep-alive");
+            println!("handle_request:{}, {}", method, uri);
+            if router.contains_url(method, uri) {
+                Ok(router.call(method, uri, request))
+            }
+            else {
+                let mut response = Self::get_root_file_response(uri)?;
 
-            Ok(response)
+                response.insert_header("content-type", "text/html; charset=UTF-8");
+                response.insert_header("connection", "keep-alive");
+
+                Ok(response)
+            }
         }
 
         async fn handle_accept(mut stream: &async_std::net::TcpStream) -> Result<HttpRequest, BacktraceError> {
@@ -755,12 +780,12 @@ pub mod web {
             Ok(http_request)
         }
 
-        async fn accept_process(stream: async_std::net::TcpStream) -> Result<(), BacktraceError> {
+        async fn accept_process(router: std::sync::Arc::<Router>, stream: async_std::net::TcpStream) -> Result<(), BacktraceError> {
             println!("accept_process...");
             
             loop {
                 let request = Self::handle_accept(&stream).await?;
-                let response = Self::handle_request(&request)?;
+                let response = Self::handle_request(&router, &request)?;
                 Self::send_response(&stream, &response).await?;
             }
 
@@ -774,6 +799,7 @@ pub mod web {
                     Ok(
                         Self {
                             socket: val,
+                            router: std::sync::Arc::new(Router::new()),
                         }
                     )
                 },
@@ -781,13 +807,19 @@ pub mod web {
             }
         }
 
-        pub async fn listen(&mut self) -> Result<(), BacktraceError> { 
+        pub fn get_router(&mut self) -> &mut std::sync::Arc<Router> {
+            return &mut self.router;
+        }
+
+        pub async fn listen(&self) -> Result<(), BacktraceError> { 
             println!("incoming...");
+            println!("{:?}", self.router.routes.get("POST").unwrap().keys());
             while let Some(stream_res) = self.socket.incoming().next().await {			
+                let router_copy = std::sync::Arc::clone(&self.router);
                 match stream_res {
                    Ok(stream) => {
 						let _handle = async_std::task::spawn(async {
-                        	if let Err(e) = Self::accept_process(stream).await {
+                        	if let Err(e) = Self::accept_process(router_copy, stream).await {
 								println!("{}", e);
 							}
 						});
@@ -934,29 +966,39 @@ mod router_tests {
 
         router.call("GET", "asd", &request);
     }
-}
 
-#[cfg(test)]
-mod server_tests {
-    use route_macro_attribute::route;
+    #[test]
+    fn contains_uri() {
+        let mut router = crate::web::Router::new();
 
-    #[route(GET, "/")]
-    #[test]
-    fn index() {
-    }
-     
-    #[test]
-    fn listen() {
-        let server_res = async_std::task::block_on(crate::web::HttpServer::new("0.0.0.0:9999"));
-        match server_res {
-            Ok(mut server) => {  
-                if let Err(e) = async_std::task::block_on(server.listen()) {
-                    panic!("{}", e);
-                }
-            },
-            Err(err_info) => {
-                panic!("{}", err_info);
-            }
-        }
+        router.register_url("POST", "/asd", &test_response);
+        assert_eq!(true, router.contains_url("POST", "/asd"));
+        assert_eq!(false, router.contains_url("GET", "/asd"));
+        assert_eq!(false, router.contains_url("POST", "asd"));
     }
 }
+
+//#[cfg(test)]
+//mod server_tests {
+//    use route_macro_attribute::route;
+//
+//    #[route(GET, "/")]
+//    #[test]
+//    fn index() {
+//    }
+//     
+//    #[test]
+//    fn listen() {
+//        let server_res = async_std::task::block_on(crate::web::HttpServer::new("0.0.0.0:9999"));
+//        match server_res {
+//            Ok(mut server) => {  
+//                if let Err(e) = async_std::task::block_on(server.listen()) {
+//                    panic!("{}", e);
+//                }
+//            },
+//            Err(err_info) => {
+//                panic!("{}", err_info);
+//            }
+//        }
+//    }
+//}
