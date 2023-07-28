@@ -43,19 +43,22 @@ pub mod web {
 
 	#[derive(Debug)]
 	pub struct BacktraceError {
+        err_desc: String,
 		err_info: String,
 	}
 
 	impl std::fmt::Display for BacktraceError {
 		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "{}", self.err_info)
+			write!(f, "Error Description:{}\r\n{}", self.err_desc, self.err_info)
 		}	
 	}
 	
 	impl<E: std::error::Error> From<E> for BacktraceError {
 		fn from(err: E) -> BacktraceError {
-			let backtrace = format!("Error Description:{}\r\n{}", err.to_string(), std::backtrace::Backtrace::force_capture());
-			Self{err_info: backtrace}
+			Self { 
+                err_desc: err.to_string(),
+                err_info: std::backtrace::Backtrace::force_capture().to_string(),
+            }
 		}
 	}
 
@@ -182,7 +185,7 @@ pub mod web {
 			else { panic!("not array type");}
 		}
 
-        fn parse_core_number(mut json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
+        fn parse_core_number(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
             let mut cache = String::new();
             let mut is_decimal = false;
 
@@ -219,7 +222,7 @@ pub mod web {
 
             loop {
                 if let Some(c) = json_iter.next() {
-                    println!("parse_core_string:[{}]", c);
+                    //println!("parse_core_string:[{}]", c);
                     if is_turn {
                         let turn_code: char = match c {
                             'a' => 7 as char,
@@ -268,7 +271,6 @@ pub mod web {
             enum ReadState {
                 KeyNameStartSign,
                 KeyName,
-                KeyNameEndSign,
                 SplitSign,
                 EndSign,
             }
@@ -280,7 +282,7 @@ pub mod web {
             *cur_json = Json::new(JsonType::Object(Default::default()));
             loop {
                 if let Some(c) = json_iter.next() { 
-                    println!("parse_core_object:[{}], state:[{:?}]", c, cur_state);
+                    //println!("parse_core_object:[{}], state:[{:?}]", c, cur_state);
                     if c == ' ' { 
                         continue; 
                     }
@@ -303,15 +305,8 @@ pub mod web {
                                 }
                             }
                         },
-                        ReadState::KeyNameEndSign => {
-                            if c != '\"' { return Err("not key name start sign");}
-
-                            cur_state = ReadState::SplitSign;
-                        },
                         ReadState::SplitSign => {
                             if c != ':' { return Err("not key name start sign");}
-
-                            cur_state = ReadState::EndSign;
 
                             let mut temp = Json::new(JsonType::Null);
                             Self::parse_core(json_iter, &mut temp)?;
@@ -348,7 +343,7 @@ pub mod web {
             loop {
                 let mut copy = json_iter.clone();
                 if let Some(c) = json_iter.next() {
-                    println!("parse_core_array:[{}]", c);
+                    //println!("parse_core_array:[{}]", c);
                     match c {
                         ',' => {
                         },
@@ -374,7 +369,7 @@ pub mod web {
         fn parse_core_null(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
             for i in 1..4 {
                 if "null".chars().nth(i).unwrap() != json_iter.next().unwrap() { 
-                    println!("not null key");
+                    //println!("not null key");
                 }
             }
             *cur_json = Json::new(JsonType::Null);
@@ -385,7 +380,7 @@ pub mod web {
             loop {
                 let mut cur_iter = json_iter.clone();
                 if let Some(c) = json_iter.next() {
-                    println!("parse_core:[{}]", c);
+                    //println!("parse_core:[{}]", c);
                     match c {
                         ' ' => {
                         },
@@ -426,7 +421,7 @@ pub mod web {
                                 }
                             }
                             else {
-                                println!("parse_core faild:[{}]", c);
+                                //println!("parse_core faild:[{}]", c);
                                 return Err("not vaild value");
                             }
                         },
@@ -535,10 +530,7 @@ pub mod web {
             }
         }
 
-        pub fn view(uri: &str) -> Result<HttpResponse, BacktraceError> {
-            const ROOT: &str = "wwwroot";
-
-            let path = format!("{}/{}{}", std::env::current_dir()?.display(), ROOT, uri);
+        fn get_file(path: &str) -> Result<HttpResponse, BacktraceError> {
             println!("path:{}", path);
 
             let file_res = std::fs::OpenOptions::new().read(true).open(path);
@@ -568,6 +560,20 @@ pub mod web {
             }
         }
 
+        pub fn view(path: &str) -> Result<HttpResponse, BacktraceError> {
+            let mut view: String = String::from("views/");
+            view += path;
+
+            Self::get_file(view.as_str())
+        }
+
+        pub fn get_root_file(uri: &str) -> Result<HttpResponse, BacktraceError> {
+            let mut root: String = String::from("wwwroot");
+            root += uri;
+
+            Self::get_file(root.as_str())
+        }
+
         pub fn json(json_val: Json) -> Self { 
             let data = json_val.to_string().as_bytes().to_vec();
 
@@ -579,7 +585,7 @@ pub mod web {
             };
 
             response.set_body(data);
-            response.insert_header("content-type", "text/html; charset=utf-8");
+            response.insert_header("content-type", "application/json; charset=utf-8");
 
             return response;
         }
@@ -693,7 +699,7 @@ pub mod web {
                 Ok(router.call(method, uri, request))
             }
             else {
-                let mut response = HttpResponse::view(uri)?;
+                let mut response = HttpResponse::get_root_file(uri)?;
 
                 response.insert_header("content-type", "text/html; charset=UTF-8");
                 response.insert_header("connection", "keep-alive");
@@ -844,7 +850,9 @@ pub mod web {
                    Ok(stream) => {
 						let _handle = async_std::task::spawn(async {
                         	if let Err(e) = Self::accept_process(router_copy, stream).await {
-								println!("{}", e);
+                                if e.err_desc != "future timed out" {
+								    println!("{}", e);
+                                }
 							}
 						});
                    },
@@ -956,16 +964,13 @@ mod json_tests {
         assert_eq!(crate::web::JsonType::i64(789), *json.index(2).get_val("a"));
     }
 
-    fn test_iter(iter: &mut (impl Iterator<Item = char> + Clone)) {
-        iter.next();
-        iter.clone();
-    }
-
     #[test]
     fn parse_complex_json_3() {
-        let json_str = "{\"www\": \"中\", \"lalala\": [1, 2, 3]}";
+        let json_str = "{\"www\": \"中文♥\", \"lalala\": [1, 2, 3]}";
 
         let mut json = crate::web::Json::parse(json_str).unwrap();
+
+        assert_eq!(crate::web::JsonType::String("中文♥".into()), *json.get_val("www"));
     }
 }
 

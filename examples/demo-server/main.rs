@@ -1,3 +1,7 @@
+fn home(param: rust_web::web::Json) -> rust_web::web::HttpResponse {
+    return rust_web::web::HttpResponse::view("index.html").unwrap();
+}
+
 fn test_response(param: rust_web::web::Json) -> rust_web::web::HttpResponse {
     println!("test_response!!!param:{}", param);
 
@@ -12,6 +16,7 @@ fn main() {
 
             let router = std::sync::Arc::get_mut(&mut router_arc).unwrap();
 
+            router.register_url("GET", "/", &home);
             router.register_url("POST", "/test", &test_response);
 
             if let Err(e) = async_std::task::block_on(server.listen()) {
