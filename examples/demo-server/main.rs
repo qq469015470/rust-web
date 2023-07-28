@@ -1,11 +1,7 @@
 fn test_response(param: rust_web::web::Json) -> rust_web::web::HttpResponse {
     println!("test_response!!!param:{}", param);
 
-    let mut response = rust_web::web::HttpResponse::new(rust_web::web::HttpResponseStatusCode::OK);
-
-    response.insert_header("content-length", "0");
-
-    return response;
+    return rust_web::web::HttpResponse::json(param);
 }
 
 fn main() {

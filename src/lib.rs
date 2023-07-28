@@ -182,260 +182,269 @@ pub mod web {
 			else { panic!("not array type");}
 		}
 
-        fn parse_core_number(json_str: &str, cur_json: &mut Json) -> Result<usize, &'static str> {
-            let mut index = 0;
+        fn parse_core_number(mut json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
             let mut cache = String::new();
             let mut is_decimal = false;
 
-            while index < json_str.chars().count() {
-                let c = json_str.chars().nth(index).unwrap();
-                match c {
-                    '.' => {
-                        if is_decimal == true { return Err("double dot");}
-                        is_decimal = true; 
-                        index += 1;
-                    },
-                    _=> {
-                        if !c.is_numeric() {break;}
-                        index += 1;
+            let mut copy_iter;
+            loop {
+                copy_iter = json_iter.clone();
+                if let Some(c) = json_iter.next() {
+                    match c {
+                        '.' => {
+                            if is_decimal == true { return Err("double dot");}
+                            is_decimal = true; 
+                        },
+                        _=> {
+                            if !c.is_numeric() {break;}
+                        }
                     }
-                }
                 cache.push(c);
+                }
+                else {
+                    break;
+                }
             }
 
             if is_decimal { *cur_json = Json::new(JsonType::f64(cache.parse::<f64>().unwrap())); }
             else { *cur_json = Json::new(JsonType::i64(cache.parse::<i64>().unwrap()));}
             
-            return Ok(index);
+            *json_iter = copy_iter;
+            return Ok(());
         }
 
-        fn parse_core_string(json_str: &str, cur_json: &mut Json) -> Result<usize, &'static str> {
-            let mut index = 0;
+        fn parse_core_string(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
             let mut cache = String::new();
             let mut is_turn = false;//转义
 
-            println!("string_core:[{}]", json_str);
-
-            while index < json_str.chars().count() {
-                let c = json_str.chars().nth(index).unwrap();
-                if is_turn {
-                    let turn_code: char = match c {
-                        'a' => 7 as char,
-                        'b' => 8 as char,
-                        'f' => 12 as char, 
-                        'n' => 10 as char,
-                        'r' => 13 as char,
-                        't' => 9 as char,
-                        'v' => 11 as char,
-                        '\\' => 92 as char, 
-                        '\'' => 39 as char,
-                        '"' => 34 as char,
-                        '?' => 64 as char,
-                        '0' => 0 as char,
-                        _=> return Err("not in turn code map"),
-                    };
-                    
-                    cache.push(turn_code);
-                    index += 1;
-                    is_turn = false;
-                }
-                else {
-                    match c {
-                        '"' => {
-                            *cur_json = Json::new(JsonType::String(cache));
-                            return Ok(index + 1);
-                        },
-                        '\\' => {
-                            is_turn = true;  
-                            index += 1;
-                        },
-                        _ => {
-                            cache.push(c);
-                            index += 1;
+            loop {
+                if let Some(c) = json_iter.next() {
+                    println!("parse_core_string:[{}]", c);
+                    if is_turn {
+                        let turn_code: char = match c {
+                            'a' => 7 as char,
+                            'b' => 8 as char,
+                            'f' => 12 as char, 
+                            'n' => 10 as char,
+                            'r' => 13 as char,
+                            't' => 9 as char,
+                            'v' => 11 as char,
+                            '\\' => 92 as char, 
+                            '\'' => 39 as char,
+                            '"' => 34 as char,
+                            '?' => 64 as char,
+                            '0' => 0 as char,
+                            _=> return Err("not in turn code map"),
+                        };
+                        
+                        cache.push(turn_code);
+                        is_turn = false;
+                    }
+                    else {
+                        match c {
+                            '"' => {
+                                *cur_json = Json::new(JsonType::String(cache));
+                                return Ok(());
+                            },
+                            '\\' => {
+                                is_turn = true;  
+                            },
+                            _ => {
+                                cache.push(c);
+                            }
                         }
                     }
+                }
+                else {
+                    break;
                 }
             }
             
             Err("not a vaild string")
         }
 
-        fn parse_core_object(json_str: &str, cur_json: &mut Json) -> Result<usize, &'static str> {
-            #[derive(PartialEq)]
+        fn parse_core_object(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
+            #[derive(PartialEq, Debug)]
             enum ReadState {
                 KeyNameStartSign,
                 KeyName,
                 KeyNameEndSign,
                 SplitSign,
-                Val,
                 EndSign,
             }
 
-            let mut index = 1;
             let mut cache = String::new();
             let mut key_name = String::new();
             let mut cur_state = ReadState::KeyNameStartSign;
 
             *cur_json = Json::new(JsonType::Object(Default::default()));
-            while index < json_str.chars().count() {
-                let c = json_str.chars().nth(index).unwrap();
-                if c == ' ' { 
-                    index = index + 1;
-                    continue; 
+            loop {
+                if let Some(c) = json_iter.next() { 
+                    println!("parse_core_object:[{}], state:[{:?}]", c, cur_state);
+                    if c == ' ' { 
+                        continue; 
+                    }
+
+                    match cur_state {
+                        ReadState::KeyNameStartSign => {
+                            if c != '\"' { return Err("not key name start sign");}
+
+                            cur_state = ReadState::KeyName;
+                        },
+                        ReadState::KeyName => {
+                            match c {
+                                '"' => {
+                                    key_name = cache;
+                                    cache = String::new();
+                                    cur_state = ReadState::SplitSign;
+                                },
+                                _ => {
+                                    cache.push(c);
+                                }
+                            }
+                        },
+                        ReadState::KeyNameEndSign => {
+                            if c != '\"' { return Err("not key name start sign");}
+
+                            cur_state = ReadState::SplitSign;
+                        },
+                        ReadState::SplitSign => {
+                            if c != ':' { return Err("not key name start sign");}
+
+                            cur_state = ReadState::EndSign;
+
+                            let mut temp = Json::new(JsonType::Null);
+                            Self::parse_core(json_iter, &mut temp)?;
+                            cur_json.set_val(key_name, temp);
+                            key_name = String::new();
+                            cur_state = ReadState::EndSign;
+                        },
+                        ReadState::EndSign => {
+                            match c {
+                                '}' => {
+                                    return Ok(());
+                                },
+                                ',' => {
+                                    cur_state = ReadState::KeyNameStartSign;
+                                },
+                                _=> {
+                                    return Err("not vaild end sign");
+                                }
+                            }
+                        },
+                    }
                 }
-
-                match cur_state {
-                    ReadState::KeyNameStartSign => {
-                        if c != '\"' { return Err("not key name start sign");}
-
-                        cur_state = ReadState::KeyName;
-                        index += 1;
-                    },
-                    ReadState::KeyName => {
-                        match c {
-                            '"' => {
-                                key_name = cache;
-                                cache = String::new();
-                                cur_state = ReadState::KeyNameEndSign;
-                            },
-                            _ => {
-                                cache.push(c);
-                                index = index + 1;
-                            }
-                        }
-                    },
-                    ReadState::KeyNameEndSign => {
-                        if c != '\"' { return Err("not key name start sign");}
-
-                        cur_state = ReadState::SplitSign;
-                        index += 1;
-                    },
-                    ReadState::SplitSign => {
-                        if c != ':' { return Err("not key name start sign");}
-
-                        cur_state = ReadState::Val;
-                        index += 1;
-                    },
-                    ReadState::Val => {
-                        let mut temp = Json::new(JsonType::Null);
-                        index = index + Self::parse_core(&json_str[index..], &mut temp)?;
-                        cur_json.set_val(key_name, temp);
-                        key_name = String::new();
-                        cur_state = ReadState::EndSign;
-                    },
-                    ReadState::EndSign => {
-                        match c {
-                            '}' => {
-                                index += 1;
-                                return Ok(index);
-                            },
-                            ',' => {
-                                cur_state = ReadState::KeyNameStartSign;
-                                index += 1;
-                            },
-                            _=> {
-                                return Err("not vaild end sign");
-                            }
-                        }
-                    },
+                else {
+                    break;
                 }
             }
             
-            Ok(index)
+            Ok(())
         }
 
-        fn parse_core_array(json_str: &str, cur_json: &mut Json) -> Result<usize, &'static str> {
-            let mut index = 1;
+        fn parse_core_array(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
 
             *cur_json = Json::new(JsonType::Vec(std::vec::Vec::<Json>::new()));
-            while index < json_str.chars().count() {
-                let c = json_str.chars().nth(index).unwrap();
-                match c {
-                    ',' => {
-                        index = index + 1;            
-                    },
-                    ']' => {
-                        index = index + 1;
-                        return Ok(index);
-                    },
-                    _ => {
-                        let mut temp =  Json::new(JsonType::Null);
-                        index = index + Self::parse_core(&json_str[index..], &mut temp)?;
-                        cur_json.push(temp);
+            loop {
+                let mut copy = json_iter.clone();
+                if let Some(c) = json_iter.next() {
+                    println!("parse_core_array:[{}]", c);
+                    match c {
+                        ',' => {
+                        },
+                        ']' => {
+                            return Ok(());
+                        },
+                        _ => {
+                            let mut temp =  Json::new(JsonType::Null);
+                            Self::parse_core(&mut copy, &mut temp)?;
+                            *json_iter = copy;
+                            cur_json.push(temp);
+                        }
                     }
+                }
+                else {
+                    break; 
                 }
             }
 
             panic!("should not in here");
         }
 
-        fn parse_core_null(json_str: &str, cur_json: &mut Json) -> Result<usize, &'static str> {
-            if json_str.chars().count() < 4 || &json_str[0..4] != "null" { return Err("not null key")}
-
+        fn parse_core_null(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
+            for i in 1..4 {
+                if "null".chars().nth(i).unwrap() != json_iter.next().unwrap() { 
+                    println!("not null key");
+                }
+            }
             *cur_json = Json::new(JsonType::Null);
-            Ok(4)
+            Ok(())
         }
 
-        fn parse_core(json_str: &str, cur_json: &mut Json) -> Result<usize, &'static str> {
-            let mut index:usize = 0;
-
-            while index < json_str.chars().count() {
-                let c = json_str.chars().nth(index).unwrap();
-                match c {
-                    ' ' => {
-                        index = index + 1;
-                    },
-                    '{' => {
-                        index = index + Self::parse_core_object(&json_str[index..], cur_json)?;
-                        return Ok(index);
-                    },
-                    '[' => {
-                        index = index + Self::parse_core_array(&json_str[index..], cur_json)?;
-                        return Ok(index);
-                    },
-                    '"' => {
-                        index = index + 1;
-
-                        if let JsonType::Vec(vec) = cur_json.get() {
-                                let mut temp = Json::new(JsonType::Null);
-                                index = index + Self::parse_core_string(&json_str[index..], &mut temp)?;
-                                vec.push(temp);
-                        }
-                        else {
-                            return Ok(index + Self::parse_core_string(&json_str[index..], cur_json)?);
-                        }
-                    },
-                    'n' => {
-                        index = index + Self::parse_core_null(&json_str[index..], cur_json)?;
-                        return Ok(index);
-                    },
-                    _ => {
-                        if c.is_numeric() {
+        fn parse_core(json_iter: &mut (impl Iterator::<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
+            loop {
+                let mut cur_iter = json_iter.clone();
+                if let Some(c) = json_iter.next() {
+                    println!("parse_core:[{}]", c);
+                    match c {
+                        ' ' => {
+                        },
+                        '{' => {
+                            Self::parse_core_object(json_iter, cur_json)?;
+                            return Ok(());
+                        },
+                        '[' => {
+                            Self::parse_core_array(json_iter, cur_json)?;
+                            return Ok(());
+                        },
+                        '"' => {
                             if let JsonType::Vec(vec) = cur_json.get() {
-                                let mut temp = Json::new(JsonType::Null);
-                                index = index + Self::parse_core_number(&json_str[index..], &mut temp)?;
-                                vec.push(temp);
+                                    let mut temp = Json::new(JsonType::Null);
+                                    Self::parse_core_string(json_iter, &mut temp)?;
+                                    vec.push(temp);
                             }
                             else {
-                                return Ok(index + Self::parse_core_number(&json_str[index..], cur_json)?);
+                                Self::parse_core_string(json_iter, cur_json)?;
+                                return Ok(());
                             }
-                            println!("in number process index:{}", index);
-                        }
-                        else {
-                            return Err("not vaild value");
-                        }
-                    },
+                        },
+                        'n' => {
+                            Self::parse_core_null(json_iter, cur_json)?;
+                            return Ok(());
+                        },
+                        _ => {
+                            if c.is_numeric() {
+                                if let JsonType::Vec(vec) = cur_json.get() {
+                                    let mut temp = Json::new(JsonType::Null);
+                                    Self::parse_core_number(&mut cur_iter, &mut temp)?;
+                                    vec.push(temp);
+                                }
+                                else {
+                                    Self::parse_core_number(&mut cur_iter, cur_json)?;
+                                    *json_iter = cur_iter;
+                                    return Ok(());
+                                }
+                            }
+                            else {
+                                println!("parse_core faild:[{}]", c);
+                                return Err("not vaild value");
+                            }
+                        },
+                    }
+                }
+                else {
+                    break;
                 }
             }
 
-            Ok(index)
+            Ok(())
         }
 
         pub fn parse(json_str: &str) -> Result<Json, &'static str> {
             let mut result = Json::new(JsonType::Null);
-            let index = Self::parse_core(json_str, &mut result)?;
+            Self::parse_core(&mut json_str.chars(), &mut result)?;
 
-            if index < json_str.trim_end().chars().count() { return Err("not vaild json"); }
+            //if index < json_str.trim_end().chars().count() { return Err("not vaild json"); }
 
             Ok(result)
         }
@@ -526,6 +535,55 @@ pub mod web {
             }
         }
 
+        pub fn view(uri: &str) -> Result<HttpResponse, BacktraceError> {
+            const ROOT: &str = "wwwroot";
+
+            let path = format!("{}/{}{}", std::env::current_dir()?.display(), ROOT, uri);
+            println!("path:{}", path);
+
+            let file_res = std::fs::OpenOptions::new().read(true).open(path);
+            match file_res {
+                Ok(mut file) => {
+                    let mut buffer = vec![0u8; file.metadata()?.len() as usize];
+
+                    let len = file.read(buffer.as_mut_slice())?;
+                    assert_eq!(len, buffer.len());
+
+                    let mut response = HttpResponse::new(HttpResponseStatusCode::OK);
+                    response.set_body(buffer);
+                    Ok(response)
+                },
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        let mut response = HttpResponse::new(HttpResponseStatusCode::NotFound);
+
+                        response.set_body("404 not found".into());
+
+                        Ok(response)
+                    }
+                    else {
+                        Ok(HttpResponse::new(HttpResponseStatusCode::InternalServerError))
+                    }
+                }
+            }
+        }
+
+        pub fn json(json_val: Json) -> Self { 
+            let data = json_val.to_string().as_bytes().to_vec();
+
+            let mut response = Self {
+                version: String::from("HTTP/1.1"), 
+                status_code: HttpResponseStatusCode::OK,
+                header: Default::default(),
+                body: Default::default(), 
+            };
+
+            response.set_body(data);
+            response.insert_header("content-type", "text/html; charset=utf-8");
+
+            return response;
+        }
+
         pub fn get_status_code(&self) -> HttpResponseStatusCode {
             self.status_code
         }
@@ -601,40 +659,6 @@ pub mod web {
     }
 
     impl HttpServer {
-
-        fn get_root_file_response(uri: &str) -> Result<HttpResponse, BacktraceError> {
-            const ROOT: &str = "wwwroot";
-
-            let path = format!("{}/{}{}", std::env::current_dir()?.display(), ROOT, uri);
-            println!("path:{}", path);
-
-            let file_res = std::fs::OpenOptions::new().read(true).open(path);
-            match file_res {
-                Ok(mut file) => {
-                    let mut buffer = vec![0u8; file.metadata()?.len() as usize];
-
-                    let len = file.read(buffer.as_mut_slice())?;
-                    assert_eq!(len, buffer.len());
-
-                    let mut response = HttpResponse::new(HttpResponseStatusCode::OK);
-                    response.set_body(buffer);
-                    Ok(response)
-                },
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        let mut response = HttpResponse::new(HttpResponseStatusCode::NotFound);
-
-                        response.set_body("404 not found".into());
-
-                        Ok(response)
-                    }
-                    else {
-                        Ok(HttpResponse::new(HttpResponseStatusCode::InternalServerError))
-                    }
-                }
-            }
-        }
-
         async fn send_response(mut stream: &async_std::net::TcpStream, response: &HttpResponse) -> Result<(), BacktraceError> {
             let head_content = format!
                                 (
@@ -669,7 +693,7 @@ pub mod web {
                 Ok(router.call(method, uri, request))
             }
             else {
-                let mut response = Self::get_root_file_response(uri)?;
+                let mut response = HttpResponse::view(uri)?;
 
                 response.insert_header("content-type", "text/html; charset=UTF-8");
                 response.insert_header("connection", "keep-alive");
@@ -909,7 +933,7 @@ mod json_tests {
     }
 
     #[test]
-    fn parse_complex_json() {
+    fn parse_complex_json_1() {
         let json_str = " { \"a\": 123, \"c\": \"a\\\"ha\\\"aad\", \"fgfgfg\": 444.2, \"complex\": { \"son\": 123}, \"zzz\": null} ";
         let mut json = crate::web::Json::parse(json_str).unwrap();
 
@@ -920,16 +944,28 @@ mod json_tests {
 
     #[test]
     fn parse_complex_json_2() {
-		let json_str = "[{\"a\": 123, \"bb\": \"aaa\"}, {\"a\": 456}, {\"a\": 789}]";
+		let json_str = "[{\"a\": 123, \"bb\": \"abc\"}, {\"a\": 456}, {\"a\": 789}]";
 
         let mut json = crate::web::Json::parse(json_str).unwrap();
 
         assert_eq!(crate::web::JsonType::i64(123), *json.index(0).get_val("a"));
-        assert_eq!(crate::web::JsonType::String("aaa".into()), *json.index(0).get_val("bb"));
+        assert_eq!(crate::web::JsonType::String("abc".into()), *json.index(0).get_val("bb"));
 
         assert_eq!(crate::web::JsonType::i64(456), *json.index(1).get_val("a"));
 
         assert_eq!(crate::web::JsonType::i64(789), *json.index(2).get_val("a"));
+    }
+
+    fn test_iter(iter: &mut (impl Iterator<Item = char> + Clone)) {
+        iter.next();
+        iter.clone();
+    }
+
+    #[test]
+    fn parse_complex_json_3() {
+        let json_str = "{\"www\": \"中\", \"lalala\": [1, 2, 3]}";
+
+        let mut json = crate::web::Json::parse(json_str).unwrap();
     }
 }
 
