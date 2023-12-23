@@ -83,6 +83,15 @@ pub mod web {
         }
     }
 
+    impl From<&JsonType> for i64 { 
+        fn from(item: &JsonType) -> Self {
+            match item {
+                JsonType::i64(val) => *val,
+                _ => 0,
+            }
+        }
+    }
+
     impl From<&mut JsonType> for f64 { 
         fn from(item: &mut JsonType) -> Self {
             match item {
@@ -158,24 +167,39 @@ pub mod web {
             }
         }
 
-        pub fn get_val(&mut self, key: &str) -> &mut JsonType {
-            match &mut *self.val {
+        pub fn get_val(&self, key: &str) -> Option<&JsonType> {
+            match &*self.val {
                 JsonType::Object(attr) => {
-                    attr.get_mut(key).unwrap().get()
+                    let Some(son_obj) = attr.get(key) else { return None; };
+                    Some(son_obj.get())
                 },
-                _ => { panic!("not object type");}
+                _ => { None }
             }
         }
 
-        pub fn get(&mut self) -> &mut JsonType {
+        pub fn get_val_mut(&mut self, key: &str) -> Option<&mut JsonType> {
+            match &mut *self.val {
+                JsonType::Object(attr) => {
+                    let Some(son_obj) = attr.get_mut(key) else { return None; };
+                    Some(son_obj.get_mut())
+                },
+                _ => { None }
+            }
+        }
+
+        pub fn get(&self) -> &JsonType {
+            return self.val.as_ref();
+        }
+
+        pub fn get_mut(&mut self) -> &mut JsonType {
             return self.val.as_mut();
         }
 
-		pub fn index(&mut self, index: usize) -> &mut Json {
-			if let JsonType::Vec(ref mut vec) = *self.val {
-				&mut vec[index]
+		pub fn index(&self, index: usize) -> Option<&Json> {
+			if let JsonType::Vec(ref vec) = *self.val {
+				Some(&vec[index])
 			}
-			else { panic!("not array type");}
+			else { None }
 		}
 
 		pub fn push(&mut self, val: Json) {
@@ -393,7 +417,7 @@ pub mod web {
                             return Ok(());
                         },
                         '"' => {
-                            if let JsonType::Vec(vec) = cur_json.get() {
+                            if let JsonType::Vec(vec) = cur_json.get_mut() {
                                     let mut temp = Json::new(JsonType::Null);
                                     Self::parse_core_string(json_iter, &mut temp)?;
                                     vec.push(temp);
@@ -409,7 +433,7 @@ pub mod web {
                         },
                         _ => {
                             if c.is_numeric() {
-                                if let JsonType::Vec(vec) = cur_json.get() {
+                                if let JsonType::Vec(vec) = cur_json.get_mut() {
                                     let mut temp = Json::new(JsonType::Null);
                                     Self::parse_core_number(&mut cur_iter, &mut temp)?;
                                     vec.push(temp);
@@ -729,7 +753,11 @@ pub mod web {
                 //let buf_size = stream.read(&mut buf).await?;
                 let buf_size = async_std::io::timeout(std::time::Duration::from_millis(5000), stream.read(&mut buf)).await?;
 
-                assert!(buf_size > 0);
+                if buf_size == 0 && cache.len() == 0 {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "socket close").into());
+                }
+
+                //assert!(buf_size > 0);
                 //cache += String::from_utf8(buf[0..buf_size].to_vec()).unwrap().as_str();
                 cache.append(&mut buf[0..buf_size].to_vec());
                 
@@ -738,6 +766,7 @@ pub mod web {
                 while cache.len() > 0 {
                     match cur_state {
                         HttpState::Method => {
+                            //println!("cache:{cache:?}");
                             let content = std::str::from_utf8(cache.as_slice())?;
                             if let Some(pos) = content.find(' ') {
                                 http_request.set_method(&content[..pos]);
@@ -780,11 +809,11 @@ pub mod web {
                                     cache = cache[pos + 2 ..].to_vec();
                                 }
                                 else {
-                                    panic!("header not correct");
+                                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "header not correct").into());
                                 }
                             } 
                             else {
-                                    panic!("header not correct");
+                                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "header not correct").into());
                             }
                         },
                         HttpState::Body => {
@@ -792,10 +821,12 @@ pub mod web {
                             let mut old_body: std::vec::Vec<u8> = http_request.get_body().clone();
                             old_body.append(&mut cache);
                             http_request.set_body(&mut old_body);
-                            cur_state = HttpState::End;
+                            if http_request.get_body().len() == http_request.get_header("content-length").unwrap().parse::<usize>()? {
+                                cur_state = HttpState::End;
+                            }
                         },
                         HttpState::End => {
-                            panic!("should not in here");
+                            return Err(std::io::Error::new(std::io::ErrorKind::Other, "should not in here").into());
                         }
                     }
                 }
@@ -814,9 +845,23 @@ pub mod web {
             println!("accept_process...");
             
             loop {
-                let request = Self::handle_accept(&stream).await?;
-                let response = Self::handle_request(&router, &request)?;
-                Self::send_response(&stream, &response).await?;
+
+                println!("ip:{} handle_accept...", stream.local_addr()?);
+                let request_res = Self::handle_accept(&stream).await;
+                match request_res {
+                    Err(e) => {
+                        if e.err_desc == "socket close" {
+                            return Ok(());
+                        }
+                        else {
+                            return Err(e);
+                        }
+                    },
+                    Ok(request) => {
+                        let response = Self::handle_request(&router, &request)?;
+                        Self::send_response(&stream, &response).await?;
+                    }
+                }
             }
 
             //Ok(())
@@ -875,32 +920,31 @@ mod json_tests {
 
         json.set_val("asd", crate::web::Json::new(crate::web::JsonType::i64(123)));
 
-        assert_eq!(i64::from(json.get_val("asd")), 123);
+        assert_eq!(i64::from(json.get_val("asd").unwrap()), 123);
     }
 
     #[test]
-    #[should_panic]
     fn get_null_val() {
-        let mut json = crate::web::Json::new(crate::web::JsonType::Null);
+        let json = crate::web::Json::new(crate::web::JsonType::Null);
 
-        json.get_val("asd"); 
+        assert!(json.get_val("asd").is_none()); 
     }
 
     #[test]
     fn parse_json() {
         let json_str = " { \"a\": 123, \"fgfgfg\": 444.2, \"complex\": { \"son\": 123}, \"c\": \"aaad\" } ";
-        let mut json = crate::web::Json::parse(json_str).unwrap();
+        let json = crate::web::Json::parse(json_str).unwrap();
 
         println!("test_display:\n{}", json);
 
-        assert_eq!(i64::from(json.get_val("a")), 123);
+        assert_eq!(i64::from(json.get_val("a").unwrap()), 123);
     }
 
     #[test]
     fn null_json() {
         let json_str = "null";
 
-        let mut json = crate::web::Json::parse(json_str).unwrap();
+        let json = crate::web::Json::parse(json_str).unwrap();
         
         println!("test_display:\n{}", json);
         assert_eq!("null", String::from(&*json.get()));
@@ -910,67 +954,67 @@ mod json_tests {
 	fn array_json_number() {
 		let json_str = "[  703,26,322]";
 
-		let mut json = crate::web::Json::parse(json_str).unwrap();
+		let json = crate::web::Json::parse(json_str).unwrap();
 
-		assert_eq!(crate::web::JsonType::i64(703), *json.index(0).get());
-		assert_eq!(crate::web::JsonType::i64(26), *json.index(1).get());
-		assert_eq!(crate::web::JsonType::i64(322), *json.index(2).get());
+		assert_eq!(crate::web::JsonType::i64(703), *json.index(0).unwrap().get());
+		assert_eq!(crate::web::JsonType::i64(26), *json.index(1).unwrap().get());
+		assert_eq!(crate::web::JsonType::i64(322), *json.index(2).unwrap().get());
 	}
 
 	#[test]
 	fn array_json_decimal() {
 		let json_str = "[7.4,20.3,3.6]";
 
-		let mut json = crate::web::Json::parse(json_str).unwrap();
+		let json = crate::web::Json::parse(json_str).unwrap();
 
-		assert_eq!(crate::web::JsonType::f64(7.4), *json.index(0).get());
-		assert_eq!(crate::web::JsonType::f64(20.3), *json.index(1).get());
-		assert_eq!(crate::web::JsonType::f64(3.6), *json.index(2).get());
+		assert_eq!(crate::web::JsonType::f64(7.4), *json.index(0).unwrap().get());
+		assert_eq!(crate::web::JsonType::f64(20.3), *json.index(1).unwrap().get());
+		assert_eq!(crate::web::JsonType::f64(3.6), *json.index(2).unwrap().get());
 	}
 
     #[test]
     fn array_json_string() {
 		let json_str = "[\"first\", \"second\", \"第三个\"]";
 
-        let mut json = crate::web::Json::parse(json_str).unwrap();
+        let json = crate::web::Json::parse(json_str).unwrap();
 
         println!("{}", json);
-		assert_eq!(crate::web::JsonType::String("first".into()), *json.index(0).get());
-		assert_eq!(crate::web::JsonType::String("second".into()), *json.index(1).get());
-		assert_eq!(crate::web::JsonType::String("第三个".into()), *json.index(2).get());
+		assert_eq!(crate::web::JsonType::String("first".into()), *json.index(0).unwrap().get());
+		assert_eq!(crate::web::JsonType::String("second".into()), *json.index(1).unwrap().get());
+		assert_eq!(crate::web::JsonType::String("第三个".into()), *json.index(2).unwrap().get());
     }
 
     #[test]
     fn parse_complex_json_1() {
         let json_str = " { \"a\": 123, \"c\": \"a\\\"ha\\\"aad\", \"fgfgfg\": 444.2, \"complex\": { \"son\": 123}, \"zzz\": null} ";
-        let mut json = crate::web::Json::parse(json_str).unwrap();
+        let json = crate::web::Json::parse(json_str).unwrap();
 
         println!("test_display:\n{}", json);
 
-        assert_eq!(String::from(&*json.get_val("c")), "a\"ha\"aad");
+        assert_eq!(String::from(&*json.get_val("c").unwrap()), "a\"ha\"aad");
     }
 
     #[test]
     fn parse_complex_json_2() {
 		let json_str = "[{\"a\": 123, \"bb\": \"abc\"}, {\"a\": 456}, {\"a\": 789}]";
 
-        let mut json = crate::web::Json::parse(json_str).unwrap();
+        let json = crate::web::Json::parse(json_str).unwrap();
 
-        assert_eq!(crate::web::JsonType::i64(123), *json.index(0).get_val("a"));
-        assert_eq!(crate::web::JsonType::String("abc".into()), *json.index(0).get_val("bb"));
+        assert_eq!(crate::web::JsonType::i64(123), *json.index(0).unwrap().get_val("a").unwrap());
+        assert_eq!(crate::web::JsonType::String("abc".into()), *json.index(0).unwrap().get_val("bb").unwrap());
 
-        assert_eq!(crate::web::JsonType::i64(456), *json.index(1).get_val("a"));
+        assert_eq!(crate::web::JsonType::i64(456), *json.index(1).unwrap().get_val("a").unwrap());
 
-        assert_eq!(crate::web::JsonType::i64(789), *json.index(2).get_val("a"));
+        assert_eq!(crate::web::JsonType::i64(789), *json.index(2).unwrap().get_val("a").unwrap());
     }
 
     #[test]
     fn parse_complex_json_3() {
         let json_str = "{\"www\": \"中文♥\", \"lalala\": [1, 2, 3]}";
 
-        let mut json = crate::web::Json::parse(json_str).unwrap();
+        let json = crate::web::Json::parse(json_str).unwrap();
 
-        assert_eq!(crate::web::JsonType::String("中文♥".into()), *json.get_val("www"));
+        assert_eq!(crate::web::JsonType::String("中文♥".into()), *json.get_val("www").unwrap());
     }
 }
 
@@ -998,7 +1042,7 @@ mod router_tests {
     fn call_back_register() {
         let mut router = crate::web::Router::new(); 
 
-        println!("add:{:p}", &test_response);
+        println!("add:{:p}", test_response as fn(_) -> _);
         router.register_url("GET".to_string(), "asd".to_string(), &test_response);
 
         let mut request = crate::web::HttpRequest::new();

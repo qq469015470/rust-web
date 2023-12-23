@@ -1,4 +1,4 @@
-fn home(param: rust_web::web::Json) -> rust_web::web::HttpResponse {
+fn home(_param: rust_web::web::Json) -> rust_web::web::HttpResponse {
     return rust_web::web::HttpResponse::view("index.html").unwrap();
 }
 
