@@ -5,15 +5,15 @@ pub mod web {
 	use async_std::io::ReadExt;
 	use async_std::io::WriteExt;
     
-    pub fn urldecode(content: &str) -> Result<String, BacktraceError> {
+    pub fn urldecode<T: AsRef<str>>(content: T) -> Result<String, BacktraceError> {
     	let mut result = std::string::String::new();
 
 		let mut i: usize = 0;
 		let mut unicode = std::vec::Vec::<u8>::new(); 
-		while i < content.chars().count() {
-			let c = content.chars().nth(i).unwrap();
+		while i < content.as_ref().chars().count() {
+			let c = content.as_ref().chars().nth(i).unwrap();
 			if c == '%' {
-				let code:&str = &content[i + 1..i + 3];
+				let code:&str = &content.as_ref()[i + 1..i + 3];
 				unicode.push(u8::from_str_radix(code, 16)?);
 				i += 3;
 			}
@@ -53,7 +53,7 @@ pub mod web {
 		}	
 	}
 	
-	impl<E: std::error::Error> From<E> for BacktraceError {
+	impl<E: std::error::Error + Sized> From<E> for BacktraceError {
 		fn from(err: E) -> BacktraceError {
 			Self { 
                 err_desc: err.to_string(),
@@ -78,6 +78,7 @@ pub mod web {
         fn from(item: &mut JsonType) -> Self {
             match item {
                 JsonType::i64(val) => *val,
+                JsonType::f64(val) => *val as i64,
                 _ => 0,
             }
         }
@@ -87,7 +88,18 @@ pub mod web {
         fn from(item: &JsonType) -> Self {
             match item {
                 JsonType::i64(val) => *val,
+                JsonType::f64(val) => *val as i64,
                 _ => 0,
+            }
+        }
+    }
+
+    impl From<&JsonType> for f64 { 
+        fn from(item: &JsonType) -> Self {
+            match item {
+                JsonType::i64(val) => *val as f64,
+                JsonType::f64(val) => *val,
+                _ => 0.0,
             }
         }
     }
@@ -149,6 +161,18 @@ pub mod web {
     #[derive(Debug)]
     pub struct Json {
         val: Box<JsonType>,
+    }
+
+    impl From<String> for Json {
+        fn from(item: String) -> Self {
+            Json::new(JsonType::String(item))
+        }
+    }
+
+    impl From<f64> for Json {
+        fn from(item: f64) -> Self {
+            Json::new(JsonType::f64(item))
+        }
     }
 
     impl Json {
@@ -467,6 +491,103 @@ pub mod web {
 
             Ok(result)
         }
+
+        pub fn parse_form_data<T: AsRef<str>>(form_data: T) -> Result<Json, String> {
+            let form_data = form_data.as_ref();
+            let mut left = 0;
+            let mut right_opt = form_data.find("=");
+
+            let mut json_obj = Json::new(JsonType::Object(Default::default()));
+            while let Some(right) = right_opt {
+                let key = &form_data[left..][..right];
+                //println!("key:{key}");
+
+                let mut key_left = 0;
+                let mut key_right_opt = key.find("%5B");
+
+                let mut cur_param: &mut JsonType = if let Some(key_right) = key_right_opt { 
+
+                    if let None = json_obj.get_val_mut(&key[key_left..key_right]) {
+                        json_obj.set_val(&key[key_left..key_right], Json::new(JsonType::Null));
+                    }
+                    
+                    json_obj.get_val_mut(&key[key_left..key_right]).unwrap()
+                }
+                else {
+                    if let None = json_obj.get_val_mut(&key[key_left..]) {
+                        json_obj.set_val(&key[key_left..], Json::new(JsonType::Null));
+                    }
+
+                    json_obj.get_val_mut(&key[key_left..]).unwrap()
+                };
+
+                while key_right_opt.is_some() {
+                    key_left = key_right_opt.unwrap() + 3;
+                    key_right_opt = key[key_left..].find("%5D");
+
+                    let attr = if let Some(key_right) = key_right_opt {
+                        key[key_left..][..key_right].to_string()
+                    } 
+                    else {
+                        key[key_left..].to_string()
+                    };
+
+                    //println!("attr:\"{attr}\"");
+                    if attr != "" {
+                        let JsonType::Object(ref mut temp) = cur_param else { return Err("must be obj".into());};
+                        
+                        cur_param = temp.get_mut(&attr).unwrap().get_mut();
+                    }
+                    else {
+                        match cur_param {
+                            JsonType::Null => { 
+                                *cur_param = JsonType::Vec(Default::default());
+                                if let JsonType::Vec(temp) = cur_param {
+                                    temp.push(Json::new(JsonType::Null));
+                                    let len = temp.len() - 1;
+                                    cur_param = temp[len].get_mut();
+                                }
+                            },
+                            JsonType::Vec(ref mut temp) => {
+                                temp.push(Json::new(JsonType::Null));
+                                let len = temp.len() - 1;
+                                cur_param = temp[len].get_mut();
+                            },
+                            _ => {
+                                 return Err("must be array".into());
+                            }
+                        }
+                    }
+
+                    key_right_opt = key[key_left..].find("%5B");
+                }
+
+                //println!("cur_param:{cur_param}");
+
+                left = left + right + 1;
+                right_opt = form_data[left..].find("&");
+                let value;
+                if let Some(right) = right_opt {
+                    value = &form_data[left..][..right];
+                    left = left + right + 1;
+                }
+                else
+                {
+                    value = &form_data[left..];
+                }
+
+                *cur_param = match urldecode(value.to_string()) {
+                    Ok(decode_str) => JsonType::String(decode_str),
+                    Err(e) => return Err(e.err_info),
+                };
+
+                if right_opt == None { break;}
+
+                right_opt = form_data[left..].find("=");
+            }
+
+            Ok(json_obj)
+        }
     }
 
     #[derive(Debug)]
@@ -474,6 +595,7 @@ pub mod web {
     pub struct HttpRequest {
         method: String,
         uri: String,
+        query_string: String,
         version: String,
         header: std::collections::HashMap<String, String>,
         body: std::vec::Vec<u8>,
@@ -493,11 +615,23 @@ pub mod web {
         }
 
         pub fn set_uri<T: Into<String>>(&mut self, uri: T) {
-            self.uri = uri.into();
+            let uri: String = uri.into();
+            if let Some(pos) = uri.find("?") {
+                let (uri, query_string) = uri.split_at(pos);
+                self.uri = uri.to_string();
+                self.query_string = query_string[1..].to_string();
+            }
+            else {
+                self.uri = uri;
+            }
         }
 
         pub fn get_uri(&self) -> &String {
             &self.uri
+        }
+
+        pub fn get_query_string(&self) -> &String {
+            &self.query_string 
         }
 
         pub fn set_version<T: Into<String>>(&mut self, version: T) {
@@ -678,7 +812,13 @@ pub mod web {
             let link = self.routes.get(method).unwrap();
             let func = link.get(url).unwrap();
 
-            let json = Json::parse(std::str::from_utf8(request.get_body()).unwrap()).unwrap();
+            let json = if method == "GET" { 
+                Json::parse_form_data(request.get_query_string()).unwrap()
+            }
+            else {
+                Json::parse(std::str::from_utf8(request.get_body()).unwrap()).unwrap() 
+            };
+
             func(json)
         }
     }
@@ -914,6 +1054,8 @@ pub mod web {
 
 #[cfg(test)]
 mod json_tests {
+    use super::*;
+
     #[test]
     fn set_and_get_val() {
         let mut json = crate::web::Json::new(crate::web::JsonType::Object(Default::default()));
@@ -938,6 +1080,33 @@ mod json_tests {
         println!("test_display:\n{}", json);
 
         assert_eq!(i64::from(json.get_val("a").unwrap()), 123);
+    }
+
+    #[test]
+    fn form_data() {
+        let temp = "w=%E4%B8%AD%E6%96%87test%F0%9F%92%96&foo=bar&lalala=123&ids%5B%5D=1&ids%5B%5D=2&ids%5B%5D=3";
+        //let temp = "ids%5B%5D=1&ids%5B%5D=2";
+        println!("string:\n{}", temp);
+
+        let json = crate::web::Json::parse_form_data(temp).unwrap();
+
+        //println!("decode:{}", web::urldecode(json.to_string().as_str()).unwrap()); 
+
+        assert_eq!("中文test💖", String::from(json.get_val("w").unwrap()));
+        assert_eq!("bar", String::from(json.get_val("foo").unwrap()));
+        assert_eq!("123", String::from(json.get_val("lalala").unwrap()));
+
+        match json.get_val("ids").unwrap() {
+            web::JsonType::Vec(arr) => {
+                assert_eq!("1", String::from(arr[0].get()));
+                assert_eq!("2", String::from(arr[1].get()));
+                assert_eq!("3", String::from(arr[2].get()));
+            },
+            _ => { assert!(false, "wrong type")} 
+        }
+
+
+        println!("form_data:\n{}", json);
     }
 
     #[test]
