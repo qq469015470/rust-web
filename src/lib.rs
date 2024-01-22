@@ -74,13 +74,15 @@ pub mod web {
         Null,
     }
 
-    impl From<&mut JsonType> for i64 { 
-        fn from(item: &mut JsonType) -> Self {
-            match item {
-                JsonType::i64(val) => *val,
-                JsonType::f64(val) => *val as i64,
-                _ => 0,
-            }
+    impl From<i64> for Json {
+        fn from(item: i64) -> Self {
+            Json::new(JsonType::i64(item))
+        }
+    }
+
+    impl From<&str> for Json {
+        fn from(item: &str) -> Self {
+            Json::new(JsonType::String(item.to_string()))
         }
     }
 
@@ -91,6 +93,13 @@ pub mod web {
                 JsonType::f64(val) => *val as i64,
                 _ => 0,
             }
+        }
+    }
+
+    impl From<&mut JsonType> for i64 { 
+        fn from(item: &mut JsonType) -> Self {
+            let item: &JsonType = item;
+            Self::from(item)
         }
     }
 
@@ -106,11 +115,8 @@ pub mod web {
 
     impl From<&mut JsonType> for f64 { 
         fn from(item: &mut JsonType) -> Self {
-            match item {
-                JsonType::i64(val) => *val as f64,
-                JsonType::f64(val) => *val,
-                _ => 0.0,
-            }
+            let item:&JsonType = item;
+            Self::from(item)
         }
     }
 
@@ -121,6 +127,13 @@ pub mod web {
                 JsonType::Null => "null".to_string(),
                 _ => "".to_string(),
             }
+        }
+    }
+
+    impl From<&mut JsonType> for String {
+        fn from(item: &mut JsonType) -> Self {
+            let item: &JsonType = item;
+            Self::from(item)
         }
     }
 
