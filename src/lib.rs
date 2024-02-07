@@ -74,12 +74,6 @@ pub mod web {
         Null,
     }
 
-    impl From<i64> for Json {
-        fn from(item: i64) -> Self {
-            Json::new(JsonType::i64(item))
-        }
-    }
-
     impl From<&str> for Json {
         fn from(item: &str) -> Self {
             Json::new(JsonType::String(item.to_string()))
@@ -91,7 +85,7 @@ pub mod web {
             match item {
                 JsonType::i64(val) => *val,
                 JsonType::f64(val) => *val as i64,
-                _ => 0,
+                _ => panic!("can not parse"),
             }
         }
     }
@@ -108,7 +102,8 @@ pub mod web {
             match item {
                 JsonType::i64(val) => *val as f64,
                 JsonType::f64(val) => *val,
-                _ => 0.0,
+                JsonType::String(val) => val.parse::<f64>().unwrap(),
+                _ => panic!("can not parse"),
             }
         }
     }
@@ -185,6 +180,12 @@ pub mod web {
     impl From<f64> for Json {
         fn from(item: f64) -> Self {
             Json::new(JsonType::f64(item))
+        }
+    }
+
+    impl From<i64> for Json {
+        fn from(item: i64) -> Self {
+            Json::new(JsonType::i64(item))
         }
     }
 
@@ -547,9 +548,25 @@ pub mod web {
 
                     //println!("attr:\"{attr}\"");
                     if attr != "" {
-                        let JsonType::Object(ref mut temp) = cur_param else { return Err("must be obj".into());};
+                        //let JsonType::Object(ref mut temp) = cur_param else { return Err("must be obj".into());};
+                        match cur_param {
+                            JsonType::Null => {
+                                *cur_param = JsonType::Object(Default::default());
+                                if let JsonType::Object(temp) = cur_param {
+                                    temp.insert(attr.clone(), Json::new(JsonType::Null));
+                                    cur_param = temp.get_mut(attr.as_str()).unwrap().get_mut();
+                                }
+                            },
+                            JsonType::Object(ref mut temp) => { 
+                                temp.insert(attr.clone(), Json::new(JsonType::Null));
+                                cur_param = temp.get_mut(attr.as_str()).unwrap().get_mut(); 
+                            },
+                            _ => {
+                                return Err("must be object".into());
+                            }
+                        }
                         
-                        cur_param = temp.get_mut(&attr).unwrap().get_mut();
+                        //cur_param = temp.get_mut(&attr).unwrap().get_mut();
                     }
                     else {
                         match cur_param {
@@ -713,6 +730,9 @@ pub mod web {
                     assert_eq!(len, buffer.len());
 
                     let mut response = HttpResponse::new(HttpResponseStatusCode::OK);
+                    
+                    response.insert_header("content-type", "text/html; charset=utf-8");
+
                     response.set_body(buffer);
                     Ok(response)
                 },
@@ -825,8 +845,14 @@ pub mod web {
             let link = self.routes.get(method).unwrap();
             let func = link.get(url).unwrap();
 
+            let def = String::new();
+            let content_type = request.get_header("content-type").or(Some(&def)).unwrap();
+
             let json = if method == "GET" { 
                 Json::parse_form_data(request.get_query_string()).unwrap()
+            }
+            else if content_type.find("application/x-www-form-urlencoded").is_some() {
+                Json::parse_form_data(std::str::from_utf8(request.get_body()).unwrap()).unwrap()
             }
             else {
                 Json::parse(std::str::from_utf8(request.get_body()).unwrap()).unwrap() 
