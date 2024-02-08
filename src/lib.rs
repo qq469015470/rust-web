@@ -731,7 +731,15 @@ pub mod web {
 
                     let mut response = HttpResponse::new(HttpResponseStatusCode::OK);
                     
-                    response.insert_header("content-type", "text/html; charset=utf-8");
+                    let file_type = *path.split('.').collect::<Vec<&str>>().last().unwrap();
+                    let content_type = match file_type {
+                        "html" => "text/html; charset=utf-8",
+                        "js" => "text/javascript",
+                        "css" => "text/css",
+                        "ico" => "image/x-icon",
+                        _ => "charset=utf-8",
+                    };
+                    response.insert_header("content-type", content_type);
 
                     response.set_body(buffer);
                     Ok(response)
@@ -904,15 +912,6 @@ pub mod web {
             else {
                 let mut response = HttpResponse::get_root_file(uri)?;
 
-                if request.get_header("accept-encoding").unwrap_or(&String::new()).split(",").find(|&item| item == "gzip").is_some() {
-                    //println!("boy use gzip");
-                    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
-                    encoder.write_all(response.get_body())?;
-                    response.set_body(encoder.finish()?);
-                    response.insert_header("content-encoding", "gzip");
-                }
-
-                response.insert_header("content-type", "text/html; charset=UTF-8");
                 response.insert_header("connection", "keep-alive");
 
                 Ok(response)
@@ -1045,7 +1044,16 @@ pub mod web {
                         }
                     },
                     Ok(request) => {
-                        let response = Self::handle_request(&router, &request)?;
+                        let mut response = Self::handle_request(&router, &request)?;
+
+                        if request.get_header("accept-encoding").unwrap_or(&String::new()).split(",").find(|&item| item == "gzip").is_some() {
+                            //println!("boy use gzip");
+                            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+                            encoder.write_all(response.get_body())?;
+                            response.set_body(encoder.finish()?);
+                            response.insert_header("content-encoding", "gzip");
+                        }
+
                         Self::send_response(&stream, &response).await?;
                     }
                 }
