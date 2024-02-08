@@ -132,6 +132,7 @@ pub mod web {
         }
     }
 
+
     impl std::fmt::Display for JsonType {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             match self {
@@ -345,13 +346,13 @@ pub mod web {
             loop {
                 if let Some(c) = json_iter.next() { 
                     //println!("parse_core_object:[{}], state:[{:?}]", c, cur_state);
-                    if c == ' ' { 
+                    if c == ' ' || c == '\n' || c == '\t' { 
                         continue; 
                     }
 
                     match cur_state {
                         ReadState::KeyNameStartSign => {
-                            if c != '\"' { return Err(std::io::Error::new(std::io::ErrorKind::Other, "not key name start sign").into());}
+                            if c != '\"' { return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("'{}' not key name start sign", c)).into());}
 
                             cur_state = ReadState::KeyName;
                         },
@@ -444,8 +445,7 @@ pub mod web {
                 if let Some(c) = json_iter.next() {
                     //println!("parse_core:[{}]", c);
                     match c {
-                        ' ' => {
-                        },
+                        ' ' => {}, '\n' => {}, '\t' => {},
                         '{' => {
                             Self::parse_core_object(json_iter, cur_json)?;
                             return Ok(());
@@ -497,9 +497,9 @@ pub mod web {
             Ok(())
         }
 
-        pub fn parse(json_str: &str) -> Result<Json, BacktraceError> {
+        pub fn parse<T: AsRef<str>>(json_str: T) -> Result<Json, BacktraceError> {
             let mut result = Json::new(JsonType::Null);
-            Self::parse_core(&mut json_str.chars(), &mut result)?;
+            Self::parse_core(&mut json_str.as_ref().chars(), &mut result)?;
 
             //if index < json_str.trim_end().chars().count() { return Err("not vaild json"); }
 
