@@ -9,3 +9,4 @@ edition = "2021"
 route_macro_attribute = { path = "route-macro-attribute"}
 futures = "0.3"
 async-std = "1.12.0"
+flate2 = "*"

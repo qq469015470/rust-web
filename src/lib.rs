@@ -1,6 +1,6 @@
 pub mod web {
     use std::io::Read;
-    //use std::io::Write;
+    use std::io::Write;
   	use async_std::stream::StreamExt;   
 	use async_std::io::ReadExt;
 	use async_std::io::WriteExt;
@@ -903,6 +903,14 @@ pub mod web {
             }
             else {
                 let mut response = HttpResponse::get_root_file(uri)?;
+
+                if request.get_header("accept-encoding").unwrap_or(&String::new()).split(",").find(|&item| item == "gzip").is_some() {
+                    //println!("boy use gzip");
+                    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+                    encoder.write_all(response.get_body())?;
+                    response.set_body(encoder.finish()?);
+                    response.insert_header("content-encoding", "gzip");
+                }
 
                 response.insert_header("content-type", "text/html; charset=UTF-8");
                 response.insert_header("connection", "keep-alive");
