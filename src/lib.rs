@@ -247,7 +247,7 @@ pub mod web {
 			else { panic!("not array type");}
 		}
 
-        fn parse_core_number(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
+        fn parse_core_number(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), BacktraceError> {
             let mut cache = String::new();
             let mut is_decimal = false;
 
@@ -257,7 +257,7 @@ pub mod web {
                 if let Some(c) = json_iter.next() {
                     match c {
                         '.' => {
-                            if is_decimal == true { return Err("double dot");}
+                            if is_decimal == true { return Err(std::io::Error::new(std::io::ErrorKind::Other, "double dot").into());}
                             is_decimal = true; 
                         },
                         _=> {
@@ -278,7 +278,7 @@ pub mod web {
             return Ok(());
         }
 
-        fn parse_core_string(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
+        fn parse_core_string(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), BacktraceError> {
             let mut cache = String::new();
             let mut is_turn = false;//转义
 
@@ -299,7 +299,7 @@ pub mod web {
                             '"' => 34 as char,
                             '?' => 64 as char,
                             '0' => 0 as char,
-                            _=> return Err("not in turn code map"),
+                            _=> return Err(std::io::Error::new(std::io::ErrorKind::Other, "not in turn code map").into()),
                         };
                         
                         cache.push(turn_code);
@@ -325,10 +325,10 @@ pub mod web {
                 }
             }
             
-            Err("not a vaild string")
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "not a vaild string").into())
         }
 
-        fn parse_core_object(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
+        fn parse_core_object(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), BacktraceError> {
             #[derive(PartialEq, Debug)]
             enum ReadState {
                 KeyNameStartSign,
@@ -351,7 +351,7 @@ pub mod web {
 
                     match cur_state {
                         ReadState::KeyNameStartSign => {
-                            if c != '\"' { return Err("not key name start sign");}
+                            if c != '\"' { return Err(std::io::Error::new(std::io::ErrorKind::Other, "not key name start sign").into());}
 
                             cur_state = ReadState::KeyName;
                         },
@@ -368,7 +368,7 @@ pub mod web {
                             }
                         },
                         ReadState::SplitSign => {
-                            if c != ':' { return Err("not key name start sign");}
+                            if c != ':' { return Err(std::io::Error::new(std::io::ErrorKind::Other, "not key name start sign").into());}
 
                             let mut temp = Json::new(JsonType::Null);
                             Self::parse_core(json_iter, &mut temp)?;
@@ -385,7 +385,7 @@ pub mod web {
                                     cur_state = ReadState::KeyNameStartSign;
                                 },
                                 _=> {
-                                    return Err("not vaild end sign");
+                                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "not vaild end sign").into());
                                 }
                             }
                         },
@@ -399,7 +399,7 @@ pub mod web {
             Ok(())
         }
 
-        fn parse_core_array(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
+        fn parse_core_array(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), BacktraceError> {
 
             *cur_json = Json::new(JsonType::Vec(std::vec::Vec::<Json>::new()));
             loop {
@@ -428,7 +428,7 @@ pub mod web {
             panic!("should not in here");
         }
 
-        fn parse_core_null(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
+        fn parse_core_null(json_iter: &mut (impl Iterator<Item = char> + Clone), cur_json: &mut Json) -> Result<(), BacktraceError> {
             for i in 1..4 {
                 if "null".chars().nth(i).unwrap() != json_iter.next().unwrap() { 
                     //println!("not null key");
@@ -438,7 +438,7 @@ pub mod web {
             Ok(())
         }
 
-        fn parse_core(json_iter: &mut (impl Iterator::<Item = char> + Clone), cur_json: &mut Json) -> Result<(), &'static str> {
+        fn parse_core(json_iter: &mut (impl Iterator::<Item = char> + Clone), cur_json: &mut Json) -> Result<(), BacktraceError> {
             loop {
                 let mut cur_iter = json_iter.clone();
                 if let Some(c) = json_iter.next() {
@@ -484,7 +484,7 @@ pub mod web {
                             }
                             else {
                                 //println!("parse_core faild:[{}]", c);
-                                return Err("not vaild value");
+                                return Err(std::io::Error::new(std::io::ErrorKind::Other, "not vaild value").into());
                             }
                         },
                     }
@@ -497,7 +497,7 @@ pub mod web {
             Ok(())
         }
 
-        pub fn parse(json_str: &str) -> Result<Json, &'static str> {
+        pub fn parse(json_str: &str) -> Result<Json, BacktraceError> {
             let mut result = Json::new(JsonType::Null);
             Self::parse_core(&mut json_str.chars(), &mut result)?;
 
@@ -506,7 +506,7 @@ pub mod web {
             Ok(result)
         }
 
-        pub fn parse_form_data<T: AsRef<str>>(form_data: T) -> Result<Json, String> {
+        pub fn parse_form_data<T: AsRef<str>>(form_data: T) -> Result<Json, BacktraceError> {
             let form_data = form_data.as_ref();
             let mut left = 0;
             let mut right_opt = form_data.find("=");
@@ -562,7 +562,7 @@ pub mod web {
                                 cur_param = temp.get_mut(attr.as_str()).unwrap().get_mut(); 
                             },
                             _ => {
-                                return Err("must be object".into());
+                                return Err(std::io::Error::new(std::io::ErrorKind::Other, "must be object").into());
                             }
                         }
                         
@@ -584,7 +584,7 @@ pub mod web {
                                 cur_param = temp[len].get_mut();
                             },
                             _ => {
-                                 return Err("must be array".into());
+                                 return Err(std::io::Error::new(std::io::ErrorKind::Other, "must be array").into());
                             }
                         }
                     }
@@ -608,7 +608,7 @@ pub mod web {
 
                 *cur_param = match urldecode(value.to_string()) {
                     Ok(decode_str) => JsonType::String(decode_str),
-                    Err(e) => return Err(e.err_info),
+                    Err(e) => return Err(e),
                 };
 
                 if right_opt == None { break;}
@@ -841,24 +841,24 @@ pub mod web {
             }
         }
 
-        pub fn call(&self, method: &str, url: &str, request: &HttpRequest) -> HttpResponse {
-            let link = self.routes.get(method).unwrap();
-            let func = link.get(url).unwrap();
+        pub fn call(&self, method: &str, url: &str, request: &HttpRequest) -> Result<HttpResponse, BacktraceError> {
+            let link = self.routes.get(method).ok_or(std::io::Error::new(std::io::ErrorKind::Other, "route have not register method"))?;
+            let func = link.get(url).ok_or(std::io::Error::new(std::io::ErrorKind::Other, "route have not register url"))?;
 
             let def = String::new();
-            let content_type = request.get_header("content-type").or(Some(&def)).unwrap();
+            let content_type = request.get_header("content-type").unwrap_or(&def);
 
-            let json = if method == "GET" { 
-                Json::parse_form_data(request.get_query_string()).unwrap()
+            let json = if content_type.find("application/json").is_some() { 
+                Json::parse(std::str::from_utf8(request.get_body())?)?
             }
             else if content_type.find("application/x-www-form-urlencoded").is_some() {
-                Json::parse_form_data(std::str::from_utf8(request.get_body()).unwrap()).unwrap()
+                Json::parse_form_data(std::str::from_utf8(request.get_body())?)?
             }
             else {
-                Json::parse(std::str::from_utf8(request.get_body()).unwrap()).unwrap() 
+                Json::parse_form_data(request.get_query_string())?
             };
 
-            func(json)
+            Ok(func(json))
         }
     }
     
@@ -899,7 +899,7 @@ pub mod web {
 
             println!("handle_request:{}, {}", method, uri);
             if router.contains_url(method, uri) {
-                Ok(router.call(method, uri, request))
+                router.call(method, uri, request)
             }
             else {
                 let mut response = HttpResponse::get_root_file(uri)?;
