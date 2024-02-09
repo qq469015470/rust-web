@@ -721,83 +721,85 @@ pub mod web {
         pub fn read(&mut self, mut buf: Vec<u8>) -> Result<&mut Self, BacktraceError> {
             self.cache.append(&mut buf);
             drop(buf);
+
+            //println!("cur_state:{:?}", self.cur_state);
             if self.cache.len() == 0 { return Ok(self); }
 
             match self.cur_state {
-               HttpState::Method => {
-                   if let Some(pos) = self.cache.iter().position(|&item| item == b' ') {
-                       self.http_request.set_method(std::str::from_utf8(&self.cache[..pos])?);
-                       self.cur_state = HttpState::URI;
-                       self.cache = self.cache[pos + 1 ..].to_vec();
-
+                HttpState::Method => {
+                    if let Some(pos) = self.cache.iter().position(|&item| item == b' ') {
+                        self.http_request.set_method(std::str::from_utf8(&self.cache[..pos])?);
+                        self.cur_state = HttpState::URI;
+                        self.cache = self.cache[pos + 1 ..].to_vec();
+                
                         return self.read(vec![]);
-                   }
-               },
-               HttpState::URI => {
-                   if let Some(pos) = self.cache.iter().position(|&item| item == b' ') {
-                       self.http_request.set_uri(std::str::from_utf8(&self.cache[..pos])?);
-                       self.cur_state = HttpState::Version;
-                       self.cache = self.cache[pos + 1 ..].to_vec();
-
+                    }
+                },
+                HttpState::URI => {
+                    if let Some(pos) = self.cache.iter().position(|&item| item == b' ') {
+                        self.http_request.set_uri(std::str::from_utf8(&self.cache[..pos])?);
+                        self.cur_state = HttpState::Version;
+                        self.cache = self.cache[pos + 1 ..].to_vec();
+                
                         return self.read(vec![]);
-                   }
-               },
-               HttpState::Version => {
-                   if let Some(pos) = self.cache.iter().position(|&item| item == b'\n') {
-                       self.http_request.set_version(std::str::from_utf8(&self.cache[..pos])?);
-                       self.cur_state = HttpState::Header;
-                       self.cache = self.cache[pos + 1 ..].to_vec();
-
+                    }
+                },
+                HttpState::Version => {
+                    if let Some(pos) = self.cache.iter().position(|&item| item == b'\n') {
+                        self.http_request.set_version(std::str::from_utf8(&self.cache[..pos])?);
+                        self.cur_state = HttpState::Header;
+                        self.cache = self.cache[pos + 1 ..].to_vec();
+                
                         return self.read(vec![]);
-                   }
-               },
-               HttpState::Header => {
-                   //println!("\\<{:}\\>", std::str::from_utf8(&self.cache)?);
-                   if let Some(pos) = self.cache.iter().position(|&item| item == b'\n') {
-                       if pos == 1 {
-                           let body_len = self.http_request.get_body_len();
-                           if body_len > 0 {
-                               self.cur_state = HttpState::Body; 
-                           }
-                           else {
-                               self.cur_state = HttpState::End;
-                           }
- 
-                           self.cache = self.cache[pos + 1..].to_vec();
+                    }
+                },
+                HttpState::Header => {
+                    //println!("*{:?}*", std::str::from_utf8(&self.cache)?);
+                    if let Some(pos) = self.cache.iter().position(|&item| item == b'\n') {
+                         //println!("pos:{pos}");
+                        if pos == 1 {
+                            self.cache = self.cache[pos + 1..].to_vec();
+                            let body_len = self.http_request.get_body_len();
+                            if body_len > 0 {
+                                self.cur_state = HttpState::Body; 
+                                return self.read(vec![]);
+                            }
+                            else {
+                                self.cur_state = HttpState::End;
+                                return Ok(self)
+                            }
+                
+                        }
+                        else if let Some(key_pos) = self.cache.iter().position(|&item| item == b':') {
+                            let content = std::str::from_utf8(&self.cache[..pos])?;
+                            self.http_request.insert_header(content[..key_pos].trim(), content[key_pos + 1..pos].trim());
+                            self.cache = self.cache[pos + 1 ..].to_vec();
+                
                             return self.read(vec![]);
-                       }
-                       else if let Some(key_pos) = self.cache.iter().position(|&item| item == b':') {
-                           let content = std::str::from_utf8(&self.cache[..pos])?;
-                           self.http_request.insert_header(content[..key_pos].trim(), content[key_pos + 1..pos].trim());
-                           self.cache = self.cache[pos + 1 ..].to_vec();
-
-                            return self.read(vec![]);
-                       }
-                       else {
-                           return Ok(self);
-                           //return Err(std::io::Error::new(std::io::ErrorKind::Other, "header not correct").into());
-                       }
-                   } 
-                   else {
-                            return Ok(self); 
-                           //return Err(std::io::Error::new(std::io::ErrorKind::Other, "header not correct").into());
-                   }
-               },
-               HttpState::Body => {
-                   //println!("cache_len:{}",self.cache.len());
-                   //println!("in body:{}", urldecode(std::str::from_utf8(self.cache.as_slice())?)?);
-                   if self.cache.len() == self.http_request.get_header("content-length").unwrap().parse::<usize>()? {
-                        self.http_request.set_body(&mut self.cache);
-                       self.cur_state = HttpState::End;
-                       return self.read(vec![]);
-                   }
-
+                        }
+                        else {
+                            return Ok(self);
+                            //return Err(std::io::Error::new(std::io::ErrorKind::Other, "header not correct").into());
+                        }
+                    } 
+                    else {
+                        return Ok(self); 
+                            //return Err(std::io::Error::new(std::io::ErrorKind::Other, "header not correct").into());
+                    }
+                },
+                HttpState::Body => {
+                    //println!("cache_len:{}",self.cache.len());
+                    //println!("in body:{}", urldecode(std::str::from_utf8(self.cache.as_slice())?)?);
+                    if self.cache.len() == self.http_request.get_header("content-length").unwrap().parse::<usize>()? {
+                         self.http_request.set_body(&mut self.cache);
+                        self.cur_state = HttpState::End;
+                    }
+                
                     return Ok(self);
-               },
-               HttpState::End => {
-                   return Ok(self);
-                   //return Err(std::io::Error::new(std::io::ErrorKind::Other, "should not in here").into());
-               }
+                },
+                HttpState::End => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "read finish").into());
+                }
             } 
 
             return Err(std::io::Error::new(std::io::ErrorKind::Other, "should not in here").into());
@@ -807,8 +809,10 @@ pub mod web {
             return self.cur_state == HttpState::End;
         }
 
-        pub fn get_request(self) -> HttpRequest {
-            return self.http_request;
+        pub fn get_request(self) -> Result<HttpRequest, BacktraceError> {
+            if !self.is_finished() { return Err(std::io::Error::new(std::io::ErrorKind::Other, "read not finish").into());}
+
+            return Ok(self.http_request);
         }
     }
 
@@ -1038,25 +1042,21 @@ pub mod web {
 
         async fn handle_accept(mut stream: &async_std::net::TcpStream) -> Result<HttpRequest, BacktraceError> {
             let mut reader = HttpRequestReader::new();
-            
+
             while !reader.is_finished() {
                 let mut buf = [0u8; 1024];
-                //let buf_size = stream.read(&mut buf).await?;
                 let buf_size = async_std::io::timeout(std::time::Duration::from_millis(5000), stream.read(&mut buf)).await?;
 
-                if buf_size == 0 {
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "socket close").into());
-                }
+                if buf_size == 0 { return Err(std::io::Error::new(std::io::ErrorKind::Other, "socket close").into()); }
 
                 reader.read(buf[..buf_size].to_vec())?;
             }
 
-            
             //println!("{:#?}", http_request);
 
             //println!("finish!!!!!!!!!!!!");
 
-            Ok(reader.get_request())
+            return Ok(reader.get_request()?)
         }
 
         async fn accept_process(router: std::sync::Arc::<Router>, stream: async_std::net::TcpStream) -> Result<(), BacktraceError> {
