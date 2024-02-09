@@ -632,10 +632,6 @@ pub mod web {
     }
 
     impl HttpRequest {
-        pub fn new() -> Self{
-            return Default::default(); 
-        }
-
         pub fn set_method<T: Into<String>>(&mut self, method: T) {
             self.method = method.into(); 
         }
@@ -691,6 +687,128 @@ pub mod web {
             else {
                 return 0;
             }
+        }
+    }
+
+    #[derive(Debug)]
+    #[derive(PartialEq)]
+    enum HttpState {
+        Method,
+        URI,
+        Version,
+        Header,
+        Body,
+        End,
+    }
+
+    #[derive(Debug)]
+    pub struct HttpRequestReader {
+        //当前等待读取的内容
+        cur_state: HttpState, 
+        http_request: HttpRequest,
+        cache: Vec<u8>,
+    }
+
+    impl HttpRequestReader {
+        pub fn new() -> Self {
+            Self {
+                cur_state: HttpState::Method,
+                http_request: Default::default(),
+                cache: Default::default(),
+            } 
+        }
+
+        pub fn read(&mut self, mut buf: Vec<u8>) -> Result<&mut Self, BacktraceError> {
+            self.cache.append(&mut buf);
+            drop(buf);
+            if self.cache.len() == 0 { return Ok(self); }
+
+            match self.cur_state {
+               HttpState::Method => {
+                   if let Some(pos) = self.cache.iter().position(|&item| item == b' ') {
+                       self.http_request.set_method(std::str::from_utf8(&self.cache[..pos])?);
+                       self.cur_state = HttpState::URI;
+                       self.cache = self.cache[pos + 1 ..].to_vec();
+
+                        return self.read(vec![]);
+                   }
+               },
+               HttpState::URI => {
+                   if let Some(pos) = self.cache.iter().position(|&item| item == b' ') {
+                       self.http_request.set_uri(std::str::from_utf8(&self.cache[..pos])?);
+                       self.cur_state = HttpState::Version;
+                       self.cache = self.cache[pos + 1 ..].to_vec();
+
+                        return self.read(vec![]);
+                   }
+               },
+               HttpState::Version => {
+                   if let Some(pos) = self.cache.iter().position(|&item| item == b'\n') {
+                       self.http_request.set_version(std::str::from_utf8(&self.cache[..pos])?);
+                       self.cur_state = HttpState::Header;
+                       self.cache = self.cache[pos + 1 ..].to_vec();
+
+                        return self.read(vec![]);
+                   }
+               },
+               HttpState::Header => {
+                   //println!("\\<{:}\\>", std::str::from_utf8(&self.cache)?);
+                   if let Some(pos) = self.cache.iter().position(|&item| item == b'\n') {
+                       if pos == 1 {
+                           let body_len = self.http_request.get_body_len();
+                           if body_len > 0 {
+                               self.cur_state = HttpState::Body; 
+                           }
+                           else {
+                               self.cur_state = HttpState::End;
+                           }
+ 
+                           self.cache = self.cache[pos + 1..].to_vec();
+                            return self.read(vec![]);
+                       }
+                       else if let Some(key_pos) = self.cache.iter().position(|&item| item == b':') {
+                           let content = std::str::from_utf8(&self.cache[..pos])?;
+                           self.http_request.insert_header(content[..key_pos].trim(), content[key_pos + 1..pos].trim());
+                           self.cache = self.cache[pos + 1 ..].to_vec();
+
+                            return self.read(vec![]);
+                       }
+                       else {
+                           return Ok(self);
+                           //return Err(std::io::Error::new(std::io::ErrorKind::Other, "header not correct").into());
+                       }
+                   } 
+                   else {
+                            return Ok(self); 
+                           //return Err(std::io::Error::new(std::io::ErrorKind::Other, "header not correct").into());
+                   }
+               },
+               HttpState::Body => {
+                   //println!("cache_len:{}",self.cache.len());
+                   //println!("in body:{}", urldecode(std::str::from_utf8(self.cache.as_slice())?)?);
+                   if self.cache.len() == self.http_request.get_header("content-length").unwrap().parse::<usize>()? {
+                        self.http_request.set_body(&mut self.cache);
+                       self.cur_state = HttpState::End;
+                       return self.read(vec![]);
+                   }
+
+                    return Ok(self);
+               },
+               HttpState::End => {
+                   return Ok(self);
+                   //return Err(std::io::Error::new(std::io::ErrorKind::Other, "should not in here").into());
+               }
+            } 
+
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "should not in here").into());
+        }
+
+        pub fn is_finished(&self) -> bool {
+            return self.cur_state == HttpState::End;
+        }
+
+        pub fn get_request(self) -> HttpRequest {
+            return self.http_request;
         }
     }
 
@@ -919,104 +1037,18 @@ pub mod web {
         }
 
         async fn handle_accept(mut stream: &async_std::net::TcpStream) -> Result<HttpRequest, BacktraceError> {
-            #[derive(Debug)]
-            #[derive(PartialEq)]
-            enum HttpState {
-                Method,
-                URI,
-                Version,
-                Header,
-                Body,
-                End,
-            }
-
-            let mut cur_state = HttpState::Method;
-            let mut cache = std::vec::Vec::<u8>::new();
-            let mut http_request = HttpRequest::new();
+            let mut reader = HttpRequestReader::new();
             
-            while cur_state != HttpState::End {
+            while !reader.is_finished() {
                 let mut buf = [0u8; 1024];
                 //let buf_size = stream.read(&mut buf).await?;
                 let buf_size = async_std::io::timeout(std::time::Duration::from_millis(5000), stream.read(&mut buf)).await?;
 
-                if buf_size == 0 && cache.len() == 0 {
+                if buf_size == 0 {
                     return Err(std::io::Error::new(std::io::ErrorKind::Other, "socket close").into());
                 }
 
-                //assert!(buf_size > 0);
-                //cache += String::from_utf8(buf[0..buf_size].to_vec()).unwrap().as_str();
-                cache.append(&mut buf[0..buf_size].to_vec());
-                
-                //print!("{}", c); 
-
-                while cache.len() > 0 {
-                    match cur_state {
-                        HttpState::Method => {
-                            //println!("cache:{cache:?}");
-                            let content = std::str::from_utf8(cache.as_slice())?;
-                            if let Some(pos) = content.find(' ') {
-                                http_request.set_method(&content[..pos]);
-                                cur_state = HttpState::URI;
-                                cache = cache[pos + 1 ..].to_vec();
-                            }
-                        },
-                        HttpState::URI => {
-                            let content = std::str::from_utf8(cache.as_slice())?;
-                            if let Some(pos) = content.find(' ') {
-                                http_request.set_uri(&content[..pos]);
-                                cur_state = HttpState::Version;
-                                cache = cache[pos + 1 ..].to_vec();
-                            }
-                        },
-                        HttpState::Version => {
-                            let content = std::str::from_utf8(cache.as_slice())?;
-                            if let Some(pos) = content.find("\r\n") {
-                                http_request.set_version(&content[..pos]);
-                                cur_state = HttpState::Header;
-                                cache = cache[pos + 2 ..].to_vec();
-                            }
-                        },
-                        HttpState::Header => {
-                            let content = std::str::from_utf8(cache.as_slice())?;
-                            if let Some(pos) = content.find("\r\n") {
-                                if pos == 0 {
-                                    let body_len = http_request.get_body_len();
-                                    if body_len > 0 {
-                                        cur_state = HttpState::Body; 
-                                    }
-                                    else {
-                                        cur_state = HttpState::End;
-                                    }
-
-                                    cache = cache[2..].to_vec();
-                                }
-                                else if let Some(key_pos) = content.find(':') {
-                                    http_request.insert_header(content[0..key_pos].trim(), content[key_pos + 1..pos].trim());
-                                    cache = cache[pos + 2 ..].to_vec();
-                                }
-                                else {
-                                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "header not correct").into());
-                                }
-                            } 
-                            else {
-                                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "header not correct").into());
-                            }
-                        },
-                        HttpState::Body => {
-                            println!("in body:{}", urldecode(std::str::from_utf8(cache.as_slice())?)?);
-                            let mut old_body: std::vec::Vec<u8> = http_request.get_body().clone();
-                            old_body.append(&mut cache);
-                            http_request.set_body(&mut old_body);
-                            if http_request.get_body().len() == http_request.get_header("content-length").unwrap().parse::<usize>()? {
-                                cur_state = HttpState::End;
-                            }
-                        },
-                        HttpState::End => {
-                            return Err(std::io::Error::new(std::io::ErrorKind::Other, "should not in here").into());
-                        }
-                    }
-                }
-
+                reader.read(buf[..buf_size].to_vec())?;
             }
 
             
@@ -1024,7 +1056,7 @@ pub mod web {
 
             //println!("finish!!!!!!!!!!!!");
 
-            Ok(http_request)
+            Ok(reader.get_request())
         }
 
         async fn accept_process(router: std::sync::Arc::<Router>, stream: async_std::net::TcpStream) -> Result<(), BacktraceError> {
@@ -1113,16 +1145,16 @@ mod json_tests {
 
     #[test]
     fn set_and_get_val() {
-        let mut json = crate::web::Json::new(crate::web::JsonType::Object(Default::default()));
+        let mut json = web::Json::new(crate::web::JsonType::Object(Default::default()));
 
-        json.set_val("asd", crate::web::Json::new(crate::web::JsonType::i64(123)));
+        json.set_val("asd", web::Json::new(crate::web::JsonType::i64(123)));
 
         assert_eq!(i64::from(json.get_val("asd").unwrap()), 123);
     }
 
     #[test]
     fn get_null_val() {
-        let json = crate::web::Json::new(crate::web::JsonType::Null);
+        let json = web::Json::new(crate::web::JsonType::Null);
 
         assert!(json.get_val("asd").is_none()); 
     }
@@ -1130,7 +1162,7 @@ mod json_tests {
     #[test]
     fn parse_json() {
         let json_str = " { \"a\": 123, \"fgfgfg\": 444.2, \"complex\": { \"son\": 123}, \"c\": \"aaad\" } ";
-        let json = crate::web::Json::parse(json_str).unwrap();
+        let json = web::Json::parse(json_str).unwrap();
 
         println!("test_display:\n{}", json);
 
@@ -1143,7 +1175,7 @@ mod json_tests {
         //let temp = "ids%5B%5D=1&ids%5B%5D=2";
         println!("string:\n{}", temp);
 
-        let json = crate::web::Json::parse_form_data(temp).unwrap();
+        let json = web::Json::parse_form_data(temp).unwrap();
 
         //println!("decode:{}", web::urldecode(json.to_string().as_str()).unwrap()); 
 
@@ -1168,7 +1200,7 @@ mod json_tests {
     fn null_json() {
         let json_str = "null";
 
-        let json = crate::web::Json::parse(json_str).unwrap();
+        let json = web::Json::parse(json_str).unwrap();
         
         println!("test_display:\n{}", json);
         assert_eq!("null", String::from(&*json.get()));
@@ -1178,40 +1210,40 @@ mod json_tests {
 	fn array_json_number() {
 		let json_str = "[  703,26,322]";
 
-		let json = crate::web::Json::parse(json_str).unwrap();
+		let json = web::Json::parse(json_str).unwrap();
 
-		assert_eq!(crate::web::JsonType::i64(703), *json.index(0).unwrap().get());
-		assert_eq!(crate::web::JsonType::i64(26), *json.index(1).unwrap().get());
-		assert_eq!(crate::web::JsonType::i64(322), *json.index(2).unwrap().get());
+		assert_eq!(web::JsonType::i64(703), *json.index(0).unwrap().get());
+		assert_eq!(web::JsonType::i64(26), *json.index(1).unwrap().get());
+		assert_eq!(web::JsonType::i64(322), *json.index(2).unwrap().get());
 	}
 
 	#[test]
 	fn array_json_decimal() {
 		let json_str = "[7.4,20.3,3.6]";
 
-		let json = crate::web::Json::parse(json_str).unwrap();
+		let json = web::Json::parse(json_str).unwrap();
 
-		assert_eq!(crate::web::JsonType::f64(7.4), *json.index(0).unwrap().get());
-		assert_eq!(crate::web::JsonType::f64(20.3), *json.index(1).unwrap().get());
-		assert_eq!(crate::web::JsonType::f64(3.6), *json.index(2).unwrap().get());
+		assert_eq!(web::JsonType::f64(7.4), *json.index(0).unwrap().get());
+		assert_eq!(web::JsonType::f64(20.3), *json.index(1).unwrap().get());
+		assert_eq!(web::JsonType::f64(3.6), *json.index(2).unwrap().get());
 	}
 
     #[test]
     fn array_json_string() {
 		let json_str = "[\"first\", \"second\", \"第三个\"]";
 
-        let json = crate::web::Json::parse(json_str).unwrap();
+        let json = web::Json::parse(json_str).unwrap();
 
         println!("{}", json);
-		assert_eq!(crate::web::JsonType::String("first".into()), *json.index(0).unwrap().get());
-		assert_eq!(crate::web::JsonType::String("second".into()), *json.index(1).unwrap().get());
-		assert_eq!(crate::web::JsonType::String("第三个".into()), *json.index(2).unwrap().get());
+		assert_eq!(web::JsonType::String("first".into()), *json.index(0).unwrap().get());
+		assert_eq!(web::JsonType::String("second".into()), *json.index(1).unwrap().get());
+		assert_eq!(web::JsonType::String("第三个".into()), *json.index(2).unwrap().get());
     }
 
     #[test]
     fn parse_complex_json_1() {
         let json_str = " { \"a\": 123, \"c\": \"a\\\"ha\\\"aad\", \"fgfgfg\": 444.2, \"complex\": { \"son\": 123}, \"zzz\": null} ";
-        let json = crate::web::Json::parse(json_str).unwrap();
+        let json = web::Json::parse(json_str).unwrap();
 
         println!("test_display:\n{}", json);
 
@@ -1222,68 +1254,98 @@ mod json_tests {
     fn parse_complex_json_2() {
 		let json_str = "[{\"a\": 123, \"bb\": \"abc\"}, {\"a\": 456}, {\"a\": 789}]";
 
-        let json = crate::web::Json::parse(json_str).unwrap();
+        let json = web::Json::parse(json_str).unwrap();
 
-        assert_eq!(crate::web::JsonType::i64(123), *json.index(0).unwrap().get_val("a").unwrap());
-        assert_eq!(crate::web::JsonType::String("abc".into()), *json.index(0).unwrap().get_val("bb").unwrap());
+        assert_eq!(web::JsonType::i64(123), *json.index(0).unwrap().get_val("a").unwrap());
+        assert_eq!(web::JsonType::String("abc".into()), *json.index(0).unwrap().get_val("bb").unwrap());
 
-        assert_eq!(crate::web::JsonType::i64(456), *json.index(1).unwrap().get_val("a").unwrap());
+        assert_eq!(web::JsonType::i64(456), *json.index(1).unwrap().get_val("a").unwrap());
 
-        assert_eq!(crate::web::JsonType::i64(789), *json.index(2).unwrap().get_val("a").unwrap());
+        assert_eq!(web::JsonType::i64(789), *json.index(2).unwrap().get_val("a").unwrap());
     }
 
     #[test]
     fn parse_complex_json_3() {
         let json_str = "{\"www\": \"中文♥\", \"lalala\": [1, 2, 3]}";
 
-        let json = crate::web::Json::parse(json_str).unwrap();
+        let json = web::Json::parse(json_str).unwrap();
 
-        assert_eq!(crate::web::JsonType::String("中文♥".into()), *json.get_val("www").unwrap());
+        assert_eq!(web::JsonType::String("中文♥".into()), *json.get_val("www").unwrap());
     }
 }
 
 #[cfg(test)]
 mod urldecode {
+    use super::*;
+
 	#[test]
 	fn test_decode() {
 		let code = "name=123&aaa=444&www=%E4%B8%AD%E6%96%87test%F0%9F%92%96";
 		
-		let result = crate::web::urldecode(code);
+		let result = web::urldecode(code);
 		assert_eq!("name=123&aaa=444&www=中文test💖", result.unwrap());
 	}
 }
 
 #[cfg(test)]
 mod router_tests {
+    use super::*;
 
-    fn test_response(param: crate::web::Json) -> crate::web::HttpResponse {
+    fn test_response(param: web::Json) -> web::HttpResponse {
         println!("test_response!!!param:{}", param);
 
-        return crate::web::HttpResponse::new(crate::web::HttpResponseStatusCode::OK);
+        return web::HttpResponse::new(web::HttpResponseStatusCode::OK);
     }
 
     #[test]
     fn call_back_register() {
-        let mut router = crate::web::Router::new(); 
+        let mut router = web::Router::new(); 
 
         println!("add:{:p}", test_response as fn(_) -> _);
         router.register_url("GET".to_string(), "asd".to_string(), &test_response);
 
-        let mut request = crate::web::HttpRequest::new();
+        let mut request = web::HttpRequest::default();
         request.set_body(&mut "{\"a\": 123123}".as_bytes().to_vec());
         request.insert_header("content-length", request.get_body().len().to_string());
 
-        router.call("GET", "asd", &request);
+        router.call("GET", "asd", &request).unwrap();
     }
 
     #[test]
     fn contains_uri() {
-        let mut router = crate::web::Router::new();
+        let mut router = web::Router::new();
 
         router.register_url("POST", "/asd", &test_response);
         assert_eq!(true, router.contains_url("POST", "/asd"));
         assert_eq!(false, router.contains_url("GET", "/asd"));
         assert_eq!(false, router.contains_url("POST", "asd"));
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    #[test]
+    fn http_request() {
+        let mut reader = web::HttpRequestReader::new();
+
+        let content = "GET / HTTP/1.1\r\n\
+        Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\r\n\
+        Accept-Encoding: gzip, deflate\r\n\
+        Accept-Language: zh-CN,zh;q=0.9\r\n\
+        Cache-Control: max-age=0\r\n\
+        Connection: keep-alive\r\n\
+        Host: 43.139.67.232:8888\r\n\
+        Upgrade-Insecure-Requests: 1\r\n\
+        User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36\r\n\r\n";
+
+        println!("{:?}", content);
+
+        reader.read(content.as_bytes().to_vec()).unwrap();
+
+        assert_eq!(true, reader.is_finished());
+
     }
 }
 
