@@ -746,7 +746,7 @@ pub mod web {
                 },
                 HttpState::Version => {
                     if let Some(pos) = self.cache.iter().position(|&item| item == b'\n') {
-                        self.http_request.set_version(std::str::from_utf8(&self.cache[..pos])?);
+                        self.http_request.set_version(std::str::from_utf8(&self.cache[..pos - 1])?);
                         self.cur_state = HttpState::Header;
                         self.cache = self.cache[pos + 1 ..].to_vec();
                 
@@ -1064,7 +1064,7 @@ pub mod web {
             
             loop {
 
-                println!("ip:{} handle_accept...", stream.local_addr()?);
+                println!("ip:{} handle_accept...", stream.peer_addr()?);
                 let request_res = Self::handle_accept(&stream).await;
                 match request_res {
                     Err(e) => {
@@ -1077,6 +1077,8 @@ pub mod web {
                     },
                     Ok(request) => {
                         let mut response = Self::handle_request(&router, &request)?;
+
+                        //println!("{:#?}", request);
 
                         if request.get_header("accept-encoding").unwrap_or(&String::new()).split(",").find(|&item| item == "gzip").is_some() {
                             //println!("boy use gzip");
