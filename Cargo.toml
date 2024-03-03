@@ -10,3 +10,4 @@ route_macro_attribute = { path = "route-macro-attribute"}
 futures = "0.3"
 async-std = "1.12.0"
 flate2 = "*"
+openssl = "0.10.64"

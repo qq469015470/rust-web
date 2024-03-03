@@ -1,9 +1,9 @@
 pub mod web {
     use std::io::Read;
     use std::io::Write;
-  	use async_std::stream::StreamExt;   
-	use async_std::io::ReadExt;
-	use async_std::io::WriteExt;
+  	//use async_std::stream::StreamExt;   
+	//use async_std::io::ReadExt;
+	//use async_std::io::WriteExt;
     
     pub fn urldecode<T: AsRef<str>>(content: T) -> Result<String, BacktraceError> {
     	let mut result = std::string::String::new();
@@ -993,12 +993,13 @@ pub mod web {
     }
     
     pub struct HttpServer {
-        socket: async_std::net::TcpListener,
+        socket: std::net::TcpListener,
         router: std::sync::Arc<Router>,
+        use_ssl: bool,
     }
 
     impl HttpServer {
-        async fn send_response(mut stream: &async_std::net::TcpStream, response: &HttpResponse) -> Result<(), BacktraceError> {
+        async fn send_response(stream: &mut impl Write, response: &HttpResponse) -> Result<(), BacktraceError> {
             let head_content = format!
                                 (
                                     "{version} {status_code}\r\n{header}\r\n", 
@@ -1016,7 +1017,10 @@ pub mod web {
 
             let wait_write = vec![head_content.as_bytes(), response.get_body()];
             for cur_buf in wait_write {
-                async_std::io::timeout(std::time::Duration::from_millis(5000), stream.write_all(cur_buf)).await?;
+                let mut had_write = 0usize;
+                while had_write < cur_buf.len() {
+                    had_write += stream.write(cur_buf)?;
+                }
             }
             //stream.flush().await.unwrap();
 
@@ -1040,12 +1044,13 @@ pub mod web {
             }
         }
 
-        async fn handle_accept(mut stream: &async_std::net::TcpStream) -> Result<HttpRequest, BacktraceError> {
+        async fn handle_accept(stream: &mut impl Read) -> Result<HttpRequest, BacktraceError> {
             let mut reader = HttpRequestReader::new();
 
             while !reader.is_finished() {
                 let mut buf = [0u8; 1024];
-                let buf_size = async_std::io::timeout(std::time::Duration::from_millis(5000), stream.read(&mut buf)).await?;
+                let buf_size = stream.read(&mut buf)?;
+                //println!("{:?}", std::str::from_utf8(&buf[0..buf_size])?);
 
                 if buf_size == 0 { return Err(std::io::Error::new(std::io::ErrorKind::Other, "socket close").into()); }
 
@@ -1059,13 +1064,59 @@ pub mod web {
             return Ok(reader.get_request()?)
         }
 
-        async fn accept_process(router: std::sync::Arc::<Router>, stream: async_std::net::TcpStream) -> Result<(), BacktraceError> {
+        async fn accept_process(use_ssl: bool, router: std::sync::Arc::<Router>, stream: std::net::TcpStream) -> Result<(), BacktraceError> {
+            enum HttpStream<'a> {
+                TCP(&'a std::net::TcpStream),
+                SSL(openssl::ssl::SslStream::<&'a std::net::TcpStream>),
+            }
+
+            impl<'a> Read for HttpStream<'a> {
+                fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+                    match self {
+                        HttpStream::TCP(stream) => stream.read(buf),
+                        HttpStream::SSL(stream) => stream.read(buf),
+                    }
+                }
+            }
+
+            impl<'a> Write for HttpStream<'a> {
+                fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+                    match self {
+                        HttpStream::TCP(stream) => stream.write(buf),
+                        HttpStream::SSL(stream) => stream.write(buf),
+                    }
+                }
+
+                fn flush(&mut self) -> Result<(), std::io::Error> {
+                    match self {
+                        HttpStream::TCP(stream) => stream.flush(),
+                        HttpStream::SSL(stream) => stream.flush(),
+                    }
+                }
+            }
+
             println!("accept_process...");
             
-            loop {
+            let mut acceptor = openssl::ssl::SslAcceptor::mozilla_intermediate(openssl::ssl::SslMethod::tls())?;
+            acceptor.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
+            acceptor.set_certificate_chain_file("cert.pem")?;
+            acceptor.check_private_key()?; 
+            let acceptor = acceptor.build();
 
-                println!("ip:{} handle_accept...", stream.peer_addr()?);
-                let request_res = Self::handle_accept(&stream).await;
+            let mut wrap_stream: HttpStream = if use_ssl { 
+                    HttpStream::SSL(acceptor.accept(&stream)?)
+                }
+                else {
+                    HttpStream::TCP(&stream)
+                };
+
+            loop {
+                match wrap_stream {
+                    HttpStream::TCP(ref stream) => println!("ip:{} handle_accept...", stream.peer_addr()?),
+                    HttpStream::SSL(ref stream) => println!("ip:{} handle_accept...", stream.get_ref().peer_addr()?),
+                }
+                let request_res = Self::handle_accept(&mut wrap_stream).await;
+
                 match request_res {
                     Err(e) => {
                         if e.err_desc == "socket close" {
@@ -1088,22 +1139,21 @@ pub mod web {
                             response.insert_header("content-encoding", "gzip");
                         }
 
-                        Self::send_response(&stream, &response).await?;
+                        Self::send_response(&mut wrap_stream, &response).await?;
                     }
                 }
             }
-
-            //Ok(())
         }
 
         pub async fn new(ip_addr: &str) -> Result<Self, BacktraceError> {
-            let bind_res = async_std::net::TcpListener::bind(ip_addr).await; 
+            let bind_res = std::net::TcpListener::bind(ip_addr); 
             match bind_res {
                 Ok(val) => { 
                     Ok(
                         Self {
                             socket: val,
                             router: std::sync::Arc::new(Router::new()),
+                            use_ssl: false,
                         }
                     )
                 },
@@ -1115,15 +1165,25 @@ pub mod web {
             return &mut self.router;
         }
 
+        pub fn use_ssl(&mut self, is_use: bool) -> &mut Self{
+            self.use_ssl = is_use;
+            return self;
+        }
+
         pub async fn listen(&self) -> Result<(), BacktraceError> { 
             println!("incoming...");
             println!("{:?}", self.router.routes.get("POST").unwrap().keys());
-            while let Some(stream_res) = self.socket.incoming().next().await {			
+            for stream_res in self.socket.incoming() {			
+                println!("socket come!");
                 let router_copy = std::sync::Arc::clone(&self.router);
+                let use_ssl = self.use_ssl;
                 match stream_res {
                    Ok(stream) => {
-						let _handle = async_std::task::spawn(async {
-                        	if let Err(e) = Self::accept_process(router_copy, stream).await {
+                        stream.set_read_timeout(Some(std::time::Duration::from_millis(5000)))?;
+                        stream.set_write_timeout(Some(std::time::Duration::from_millis(5000)))?;
+
+						let _handle = async_std::task::spawn(async move {
+                        	if let Err(e) = Self::accept_process(use_ssl, router_copy, stream).await {
                                 if e.err_desc != "future timed out" {
 								    println!("{}", e);
                                 }
