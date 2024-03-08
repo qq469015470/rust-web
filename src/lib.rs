@@ -1038,8 +1038,6 @@ pub mod web {
             else {
                 let mut response = HttpResponse::get_root_file(uri)?;
 
-                response.insert_header("connection", "keep-alive");
-
                 Ok(response)
             }
         }
@@ -1097,20 +1095,19 @@ pub mod web {
 
             println!("accept_process...");
             
-            let mut acceptor = openssl::ssl::SslAcceptor::mozilla_intermediate(openssl::ssl::SslMethod::tls())?;
-            acceptor.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
-            acceptor.set_certificate_chain_file("cert.pem")?;
-            acceptor.check_private_key()?; 
-            let acceptor = acceptor.build();
-
             let mut wrap_stream: HttpStream = if use_ssl { 
+                let mut acceptor = openssl::ssl::SslAcceptor::mozilla_intermediate(openssl::ssl::SslMethod::tls())?;
+                acceptor.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
+                acceptor.set_certificate_chain_file("cert.pem")?;
+                acceptor.check_private_key()?; 
+                let acceptor = acceptor.build();
                     HttpStream::SSL(acceptor.accept(&stream)?)
                 }
                 else {
                     HttpStream::TCP(&stream)
                 };
 
-            loop {
+            //loop {
                 match wrap_stream {
                     HttpStream::TCP(ref stream) => println!("ip:{} handle_accept...", stream.peer_addr()?),
                     HttpStream::SSL(ref stream) => println!("ip:{} handle_accept...", stream.get_ref().peer_addr()?),
@@ -1139,10 +1136,14 @@ pub mod web {
                             response.insert_header("content-encoding", "gzip");
                         }
 
+                        response.insert_header("connection", "close");
+
                         Self::send_response(&mut wrap_stream, &response).await?;
                     }
                 }
-            }
+            //}
+
+            Ok(())
         }
 
         pub async fn new(ip_addr: &str) -> Result<Self, BacktraceError> {
