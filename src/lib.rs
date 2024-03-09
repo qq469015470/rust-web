@@ -1137,13 +1137,15 @@ pub mod web {
                             response.insert_header("content-encoding", "gzip");
                         }
 
-                        //response.insert_header("connection", "close");
-                        response.insert_header("connection", "keep-alive");
-                        response.insert_header("keep-alive", "timeout=5");
+                        response.insert_header("connection", "close");
+                        //response.insert_header("connection", "keep-alive");
+                        //response.insert_header("keep-alive", "timeout=5");
 
                         Self::send_response(&mut wrap_stream, &response).await?;
                     }
                 }
+                //暂时不支持长链接
+                break;
             }
 
             Ok(())
@@ -1178,7 +1180,6 @@ pub mod web {
             println!("incoming...");
             println!("{:?}", self.router.routes.get("POST").unwrap().keys());
             for stream_res in self.socket.incoming() {			
-                println!("socket come!");
                 let router_copy = std::sync::Arc::clone(&self.router);
                 let use_ssl = self.use_ssl;
                 match stream_res {
