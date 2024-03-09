@@ -672,8 +672,8 @@ pub mod web {
             self.header.get(&key.to_lowercase())
         }
 
-        pub fn set_body(&mut self, buffer: &mut std::vec::Vec<u8>) {
-            std::mem::swap(&mut self.body, buffer);
+        pub fn set_body(&mut self, buffer: std::vec::Vec<u8>) {
+            self.body = buffer;
         }
 
         pub fn get_body(&self) -> &std::vec::Vec<u8> {
@@ -791,7 +791,7 @@ pub mod web {
                     //println!("cache_len:{}",self.cache.len());
                     //println!("in body:{}", urldecode(std::str::from_utf8(self.cache.as_slice())?)?);
                     if self.cache.len() == self.http_request.get_header("content-length").unwrap().parse::<usize>()? {
-                         self.http_request.set_body(&mut self.cache);
+                         self.http_request.set_body(std::mem::take(&mut self.cache));
                         self.cur_state = HttpState::End;
                     }
                 
@@ -816,7 +816,7 @@ pub mod web {
         }
     }
 
-    #[derive(Copy, Clone)]
+    #[derive(Copy, Clone, Debug)]
     pub enum HttpResponseStatusCode {
         OK = 200,
         NotFound = 404,
@@ -1002,9 +1002,10 @@ pub mod web {
         async fn send_response(stream: &mut impl Write, response: &HttpResponse) -> Result<(), BacktraceError> {
             let head_content = format!
                                 (
-                                    "{version} {status_code}\r\n{header}\r\n", 
+                                    "{version} {status_code} {status_desc}\r\n{header}\r\n", 
                                     version = response.get_version(), 
                                     status_code = response.get_status_code() as u16,
+                                    status_desc = format!("{:?}", response.get_status_code()),
                                     header = (|| {
                                         let mut result = String::new();
                                         for (key, val) in response.get_header() {
@@ -1015,11 +1016,11 @@ pub mod web {
                                     })()
                                 );
 
-            let wait_write = vec![head_content.as_bytes(), response.get_body()];
+            let wait_write = vec![head_content.as_bytes(), response.get_body().as_slice()];
             for cur_buf in wait_write {
                 let mut had_write = 0usize;
                 while had_write < cur_buf.len() {
-                    had_write += stream.write(cur_buf)?;
+                    had_write += stream.write(&cur_buf[had_write..cur_buf.len()])?;
                 }
             }
             //stream.flush().await.unwrap();
@@ -1036,7 +1037,7 @@ pub mod web {
                 router.call(method, uri, request)
             }
             else {
-                let mut response = HttpResponse::get_root_file(uri)?;
+                let response = HttpResponse::get_root_file(uri)?;
 
                 Ok(response)
             }
@@ -1107,7 +1108,7 @@ pub mod web {
                     HttpStream::TCP(&stream)
                 };
 
-            //loop {
+            loop {
                 match wrap_stream {
                     HttpStream::TCP(ref stream) => println!("ip:{} handle_accept...", stream.peer_addr()?),
                     HttpStream::SSL(ref stream) => println!("ip:{} handle_accept...", stream.get_ref().peer_addr()?),
@@ -1136,12 +1137,14 @@ pub mod web {
                             response.insert_header("content-encoding", "gzip");
                         }
 
-                        response.insert_header("connection", "close");
+                        //response.insert_header("connection", "close");
+                        response.insert_header("connection", "keep-alive");
+                        response.insert_header("keep-alive", "timeout=5");
 
                         Self::send_response(&mut wrap_stream, &response).await?;
                     }
                 }
-            //}
+            }
 
             Ok(())
         }
