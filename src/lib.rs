@@ -1,6 +1,7 @@
 pub mod web {
     use std::io::Read;
     use std::io::Write;
+    use num_enum::TryFromPrimitive;
   	//use async_std::stream::StreamExt;   
 	//use async_std::io::ReadExt;
 	//use async_std::io::WriteExt;
@@ -660,6 +661,10 @@ pub mod web {
             &self.query_string 
         }
 
+        pub fn get_version(&self) -> &String {
+            &self.version
+        }
+
         pub fn set_version<T: Into<String>>(&mut self, version: T) {
             self.version = version.into();
         }
@@ -670,6 +675,10 @@ pub mod web {
 
         pub fn get_header(&self, key: &str) -> Option<&String> {
             self.header.get(&key.to_lowercase())
+        }
+
+        pub fn get_header_keys(&self) -> impl Iterator<Item = &String> {
+            self.header.keys()
         }
 
         pub fn set_body(&mut self, buffer: std::vec::Vec<u8>) {
@@ -692,7 +701,7 @@ pub mod web {
 
     #[derive(Debug)]
     #[derive(PartialEq)]
-    enum HttpState {
+    enum RequestReaderState {
         Method,
         URI,
         Version,
@@ -704,7 +713,7 @@ pub mod web {
     #[derive(Debug)]
     pub struct HttpRequestReader {
         //当前等待读取的内容
-        cur_state: HttpState, 
+        cur_state: RequestReaderState, 
         http_request: HttpRequest,
         cache: Vec<u8>,
     }
@@ -712,13 +721,17 @@ pub mod web {
     impl HttpRequestReader {
         pub fn new() -> Self {
             Self {
-                cur_state: HttpState::Method,
+                cur_state: RequestReaderState::Method,
                 http_request: Default::default(),
                 cache: Default::default(),
             } 
         }
 
         pub fn read(&mut self, mut buf: Vec<u8>) -> Result<&mut Self, BacktraceError> {
+            if self.cur_state == RequestReaderState::Body && buf.len() == 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, "read body but buf not change").into());
+            }
+
             self.cache.append(&mut buf);
             drop(buf);
 
@@ -726,34 +739,34 @@ pub mod web {
             if self.cache.len() == 0 { return Ok(self); }
 
             match self.cur_state {
-                HttpState::Method => {
+                RequestReaderState::Method => {
                     if let Some(pos) = self.cache.iter().position(|&item| item == b' ') {
                         self.http_request.set_method(std::str::from_utf8(&self.cache[..pos])?);
-                        self.cur_state = HttpState::URI;
+                        self.cur_state = RequestReaderState::URI;
                         self.cache = self.cache[pos + 1 ..].to_vec();
                 
                         return self.read(vec![]);
                     }
                 },
-                HttpState::URI => {
+                RequestReaderState::URI => {
                     if let Some(pos) = self.cache.iter().position(|&item| item == b' ') {
                         self.http_request.set_uri(std::str::from_utf8(&self.cache[..pos])?);
-                        self.cur_state = HttpState::Version;
+                        self.cur_state = RequestReaderState::Version;
                         self.cache = self.cache[pos + 1 ..].to_vec();
                 
                         return self.read(vec![]);
                     }
                 },
-                HttpState::Version => {
+                RequestReaderState::Version => {
                     if let Some(pos) = self.cache.iter().position(|&item| item == b'\n') {
                         self.http_request.set_version(std::str::from_utf8(&self.cache[..pos - 1])?);
-                        self.cur_state = HttpState::Header;
+                        self.cur_state = RequestReaderState::Header;
                         self.cache = self.cache[pos + 1 ..].to_vec();
                 
                         return self.read(vec![]);
                     }
                 },
-                HttpState::Header => {
+                RequestReaderState::Header => {
                     //println!("*{:?}*", std::str::from_utf8(&self.cache)?);
                     if let Some(pos) = self.cache.iter().position(|&item| item == b'\n') {
                          //println!("pos:{pos}");
@@ -761,11 +774,11 @@ pub mod web {
                             self.cache = self.cache[pos + 1..].to_vec();
                             let body_len = self.http_request.get_body_len();
                             if body_len > 0 {
-                                self.cur_state = HttpState::Body; 
+                                self.cur_state = RequestReaderState::Body; 
                                 return self.read(vec![]);
                             }
                             else {
-                                self.cur_state = HttpState::End;
+                                self.cur_state = RequestReaderState::End;
                                 return Ok(self)
                             }
                 
@@ -787,17 +800,17 @@ pub mod web {
                             //return Err(std::io::Error::new(std::io::ErrorKind::Other, "header not correct").into());
                     }
                 },
-                HttpState::Body => {
+                RequestReaderState::Body => {
                     //println!("cache_len:{}",self.cache.len());
                     //println!("in body:{}", urldecode(std::str::from_utf8(self.cache.as_slice())?)?);
                     if self.cache.len() == self.http_request.get_header("content-length").unwrap().parse::<usize>()? {
                          self.http_request.set_body(std::mem::take(&mut self.cache));
-                        self.cur_state = HttpState::End;
+                        self.cur_state = RequestReaderState::End;
                     }
                 
                     return Ok(self);
                 },
-                HttpState::End => {
+                RequestReaderState::End => {
                     return Err(std::io::Error::new(std::io::ErrorKind::Other, "read finish").into());
                 }
             } 
@@ -806,7 +819,7 @@ pub mod web {
         }
 
         pub fn is_finished(&self) -> bool {
-            return self.cur_state == HttpState::End;
+            return self.cur_state == RequestReaderState::End;
         }
 
         pub fn get_request(self) -> Result<HttpRequest, BacktraceError> {
@@ -816,25 +829,29 @@ pub mod web {
         }
     }
 
-    #[derive(Copy, Clone, Debug)]
+    #[derive(Copy, Clone, Debug, TryFromPrimitive)]
+    #[repr(u16)]
     pub enum HttpResponseStatusCode {
         OK = 200,
         NotFound = 404,
         InternalServerError = 500,
     }
 
+    #[derive(Debug)]
     pub struct HttpResponse {
         version: String, 
         status_code: HttpResponseStatusCode,
+        status_desc: String,
         header: std::collections::HashMap<String, String>,  
         body: std::vec::Vec::<u8>,
     }
 
     impl HttpResponse {
-        pub fn new(code: HttpResponseStatusCode,) -> Self {
+        pub fn new(code: HttpResponseStatusCode) -> Self {
             Self { 
                 version: String::from("HTTP/1.1"), 
                 status_code: code,
+                status_desc: format!("{:?}", code),
                 header: Default::default(),
                 body: Default::default(),
             }
@@ -901,6 +918,7 @@ pub mod web {
             let mut response = Self {
                 version: String::from("HTTP/1.1"), 
                 status_code: HttpResponseStatusCode::OK,
+                status_desc: format!("{:?}", HttpResponseStatusCode::OK),
                 header: Default::default(),
                 body: Default::default(), 
             };
@@ -911,8 +929,16 @@ pub mod web {
             return response;
         }
 
+        pub fn set_status_code(&mut self, code: HttpResponseStatusCode) {
+            self.status_code = code;
+        }
+
         pub fn get_status_code(&self) -> HttpResponseStatusCode {
             self.status_code
+        }
+
+        pub fn set_status_desc<T: Into<String>>(&mut self, desc: T) {
+            self.status_desc = desc.into();
         }
 
         pub fn insert_header<K: Into<String>, V: Into<String>>(&mut self, key: K, val: V) {
@@ -932,9 +958,120 @@ pub mod web {
             &self.body
         }
 
+        pub fn set_version<T: Into<String>>(&mut self, version: T) {
+            self.version = version.into()
+        }
+
         pub fn get_version(&self) -> &str {
             self.version.as_str()
         } 
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ResponseReaderState {
+        Version,
+        StatusCode,
+        StatusDesc,
+        Header,
+        Body,
+        End,
+    }
+
+    #[derive(Debug)]
+    pub struct HttpResponseReader {
+        cur_state: ResponseReaderState,
+        response: HttpResponse,
+        cache: Vec<u8>,
+    }
+
+    impl Default for HttpResponseReader {
+        fn default() -> Self {
+            Self {
+                cur_state: ResponseReaderState::Version,
+                response: HttpResponse::new(HttpResponseStatusCode::OK), 
+                cache: Vec::<u8>::new(),    
+            }
+        }
+    }
+
+    impl HttpResponseReader {
+        pub fn read(&mut self, mut buf: Vec<u8>) -> Result<&mut Self, BacktraceError> {
+            self.cache.append(&mut buf);
+
+            match self.cur_state {
+                ResponseReaderState::Version => {
+                    if let Some(pos) = self.cache.iter().position(|&item| item == b' ') {
+                        self.response.set_version(std::str::from_utf8(&self.cache[..pos])?);
+                        self.cache = self.cache[pos + 1..].to_vec();
+                        self.cur_state = ResponseReaderState::StatusCode;
+                        
+                        return self.read(vec![]);
+                    }
+                },
+                ResponseReaderState::StatusCode => {
+                    if let Some(pos) = self.cache.iter().position(|&item| item == b' ') {
+                        let code_str = std::str::from_utf8(&self.cache[..pos])?;
+                        let code_u16 = code_str.parse::<u16>()?;
+                        let enum_code = HttpResponseStatusCode::try_from(code_u16)?;
+                        self.response.set_status_code(enum_code);
+                        self.cache = self.cache[pos + 1..].to_vec();
+                        self.cur_state = ResponseReaderState::StatusDesc;
+                        
+                        return self.read(vec![]);
+                    }
+                },
+                ResponseReaderState::StatusDesc => {
+                    if let Some(pos) = self.cache.iter().position(|&item| item == b'\n') {
+                        self.response.set_status_desc(std::str::from_utf8(&self.cache[..pos - 1])?);
+                        self.cache = self.cache[pos + 1..].to_vec();
+                        self.cur_state = ResponseReaderState::Header;
+                        
+                        return self.read(vec![]);
+                    }
+                },
+                ResponseReaderState::Header => {
+                    if let Some(return_pos) = self.cache.iter().position(|&item| item == b'\n') {
+                        let attr = &self.cache[..return_pos];
+
+                        if attr[0] == b'\r' { 
+                            self.cur_state = ResponseReaderState::Body;
+                            self.cache = self.cache[return_pos + 1..].to_vec();
+                        }
+                        else if let Some(split_pos) = attr.iter().position(|&item| item == b':') {
+                            let key = &attr[..split_pos];
+                            let value = &attr[split_pos + 1..return_pos - 1];
+
+                            self.response.insert_header(std::str::from_utf8(&key)?.trim().to_lowercase(), std::str::from_utf8(&value)?.trim());
+                            self.cache = self.cache[return_pos + 1..].to_vec();
+                        }
+
+                        return self.read(vec![]);
+                    } 
+                },
+                ResponseReaderState::Body => {
+                    let (_key, val) = self.response.get_header().find(|(key, _val)| key.as_str() == "content-length").ok_or(std::io::Error::new(std::io::ErrorKind::Other, "not have content-length"))?;
+                    if self.cache.len() == val.parse::<usize>()? {
+                        self.response.set_body(std::mem::take(&mut self.cache));
+                        self.cur_state = ResponseReaderState::End;
+                    }
+                },
+                ResponseReaderState::End => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "is finish").into());
+                },
+            }
+
+            Ok(self)
+        }
+
+        pub fn is_finished(&self) -> bool {
+            return self.cur_state == ResponseReaderState::End;
+        }
+
+        pub fn get_response(self) -> Result<HttpResponse, BacktraceError> {
+            if !self.is_finished() { return Err(std::io::Error::new(std::io::ErrorKind::Other, "read not finish").into());}
+
+            return Ok(self.response);
+        }
     }
 
     type WebFunc = dyn Fn(Json) -> HttpResponse + Send + Sync;
@@ -1204,6 +1341,71 @@ pub mod web {
             Ok(())
         }
     }
+
+    #[derive(Default)]
+    pub struct HttpClient {
+    }
+
+    impl HttpClient {
+        fn get_request_header_string(request: &HttpRequest) -> String {
+            format!("{method} {uri}{query_string} {version}\r\n\
+                    {headers}\
+                    \r\n",
+                    method = request.get_method(),
+                    uri = request.get_uri(), 
+                    query_string = request.get_query_string(),
+                    version = request.get_version(),
+                    headers = request.get_header_keys().map(|key| {
+                        format!("{key}: {}\r\n", request.get_header(key).unwrap())
+                    }).collect::<String>()
+            )
+        }
+
+        pub fn get<T: AsRef<str>>(&self, address: T) -> Result<(), BacktraceError> {
+            let address = address.as_ref();
+            let mut host = address;
+            let mut uri = "/";
+
+            if let Some(pos) = host.find("http://") {
+                if pos == 0 { 
+                    host = &host[pos + 7..];
+                }
+            }
+            if let Some(pos) = host.find('/') {
+                uri = &host[pos..host.len()];
+                host = &host[0..pos];
+            }
+
+            let mut request = HttpRequest::default();
+
+            request.set_method("GET");
+            request.set_uri(uri);
+            request.set_version("HTTP/1.1");
+            request.insert_header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
+            request.insert_header("host", host);
+            request.insert_header("cache-control", "no-cache");
+            request.insert_header("pragma", "no-cache");
+
+            let request_str = Self::get_request_header_string(&request);
+            println!("{}", request_str);
+
+            let mut stream = std::net::TcpStream::connect(format!("{}:80", host))?;
+
+            stream.write_all(request_str.as_bytes())?;
+
+            let mut buffer = [0u8; 1024];
+            let mut response_reader = HttpResponseReader::default();
+
+            while !response_reader.is_finished() {
+                let buffer_size = stream.read(&mut buffer)?;
+                response_reader.read(buffer[0..buffer_size].to_vec())?;
+            }
+
+            println!("{}", std::str::from_utf8(&response_reader.get_response().unwrap().get_body())?);
+
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1372,7 +1574,7 @@ mod router_tests {
         router.register_url("GET".to_string(), "asd".to_string(), &test_response);
 
         let mut request = web::HttpRequest::default();
-        request.set_body(&mut "{\"a\": 123123}".as_bytes().to_vec());
+        request.set_body("{\"a\": 123123}".as_bytes().to_vec());
         request.insert_header("content-length", request.get_body().len().to_string());
 
         router.call("GET", "asd", &request).unwrap();
@@ -1413,6 +1615,18 @@ mod request_tests {
 
         assert_eq!(true, reader.is_finished());
 
+    }
+}
+
+#[cfg(test)]
+mod http_client_tests {
+    use super::*;
+
+    #[test]
+    fn get() {
+        let client = web::HttpClient::default();
+
+        client.get("http://www.baidu.com/").unwrap();
     }
 }
 
