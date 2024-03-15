@@ -75,12 +75,6 @@ pub mod web {
         Null,
     }
 
-    impl From<&str> for Json {
-        fn from(item: &str) -> Self {
-            Json::new(JsonType::String(item.to_string()))
-        }
-    }
-
     impl From<&JsonType> for i64 { 
         fn from(item: &JsonType) -> Self {
             match item {
@@ -133,6 +127,12 @@ pub mod web {
         }
     }
 
+    impl<const N: usize> From<[(String, Json); N]> for JsonType {
+        fn from(item: [(String, Json); N]) -> Self {
+            JsonType::Object(std::collections::HashMap::from(item))
+        }
+    }
+
 
     impl std::fmt::Display for JsonType {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -173,6 +173,12 @@ pub mod web {
         val: Box<JsonType>,
     }
 
+    impl From<&str> for Json {
+        fn from(item: &str) -> Self {
+            item.to_string().into()
+        }
+    }
+
     impl From<String> for Json {
         fn from(item: String) -> Self {
             Json::new(JsonType::String(item))
@@ -188,6 +194,18 @@ pub mod web {
     impl From<i64> for Json {
         fn from(item: i64) -> Self {
             Json::new(JsonType::i64(item))
+        }
+    }
+
+    //impl From<std::collections::HashMap<String, Json>> for Json {
+    //    fn from(item: std::collections::HashMap<String, Json>) -> Self {
+    //        Json::new(JsonType::Object(item))
+    //    }
+    //}
+
+    impl<const N: usize> From<[(String, Json); N]> for Json {
+        fn from(item: [(String, Json); N]) -> Self {
+            Json::new(JsonType::Object(item.into()))
         }
     }
 
@@ -621,8 +639,7 @@ pub mod web {
         }
     }
 
-    #[derive(Debug)]
-    #[derive(Default)]
+    #[derive(Debug, Default, Clone)]
     pub struct HttpRequest {
         method: String,
         uri: String,
@@ -683,6 +700,8 @@ pub mod web {
 
         pub fn set_body(&mut self, buffer: std::vec::Vec<u8>) {
             self.body = buffer;
+
+            self.insert_header("content-length", self.body.len().to_string());
         }
 
         pub fn get_body(&self) -> &std::vec::Vec<u8> {
@@ -834,6 +853,10 @@ pub mod web {
     pub enum HttpResponseStatusCode {
         OK = 200,
         NotFound = 404,
+        BadRequest = 400,
+        Unauthorized = 401,
+        Found = 302,
+        UnsupportedMediaType = 415,
         InternalServerError = 500,
     }
 
@@ -1356,52 +1379,101 @@ pub mod web {
                     query_string = request.get_query_string(),
                     version = request.get_version(),
                     headers = request.get_header_keys().map(|key| {
-                        format!("{key}: {}\r\n", request.get_header(key).unwrap())
+                        let val = request.get_header(key).unwrap();
+                        //let mut new_key = key.clone();
+                        //new_key.replace_range(0..1, &key.as_str()[0..1].to_uppercase());
+                        format!("{key}: {val}\r\n", )
                     }).collect::<String>()
             )
         }
 
-        pub fn get<T: AsRef<str>>(&self, address: T) -> Result<(), BacktraceError> {
-            let address = address.as_ref();
-            let mut host = address;
-            let mut uri = "/";
+        pub fn send<T: Into<String>>(&self, address: T, mut request: HttpRequest) -> Result<(), BacktraceError> {
+            let mut address: String = address.into();
+            let host: String;
+            let port: String;
+            let uri: String;
+            let mut protocol = String::default();
 
-            if let Some(pos) = host.find("http://") {
-                if pos == 0 { 
-                    host = &host[pos + 7..];
+            for item in ["http://", "https://"] {
+                if let Some((left, right)) = address.split_once(item) {
+                    if !left.is_empty() {panic!("")}
+                    protocol = item.to_string();
+                    address = right.to_string();
+                    break;
                 }
             }
-            if let Some(pos) = host.find('/') {
-                uri = &host[pos..host.len()];
-                host = &host[0..pos];
+
+            if protocol.is_empty() { return Err(std::io::Error::new(std::io::ErrorKind::Other, "not match protocol!").into());}
+
+            let host_port: Vec<&str>;
+            if let Some((left, right)) = address.split_once('/') {
+                host_port = left.split(':').collect::<Vec<&str>>();
+                uri = format!("/{right}");
+            }
+            else {
+                host_port = address.split(':').collect::<Vec<&str>>();
+                uri = String::from("/");
             }
 
-            let mut request = HttpRequest::default();
+            if host_port.len() == 1 {
+                host = host_port[0].to_string();
+                port = match protocol.as_str() {
+                    "http://" => String::from("80"),
+                    "https://" => String::from("443"),
+                    _ => return Err(std::io::Error::new(std::io::ErrorKind::Other, "not match protocol!").into()),
+                };
+            }
+            else {
+                host = host_port[0].to_string();
+                port = host_port[1].to_string();
+            }
 
-            request.set_method("GET");
+
+            //println!("protocol:{protocol},host:{host},port:{port},uri:{uri}");
+
+            request.insert_header("host", host.as_str());
             request.set_uri(uri);
-            request.set_version("HTTP/1.1");
-            request.insert_header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
-            request.insert_header("host", host);
-            request.insert_header("cache-control", "no-cache");
-            request.insert_header("pragma", "no-cache");
+
 
             let request_str = Self::get_request_header_string(&request);
-            println!("{}", request_str);
 
-            let mut stream = std::net::TcpStream::connect(format!("{}:80", host))?;
+            //println!("{request_str}");
 
-            stream.write_all(request_str.as_bytes())?;
+            let mut stream = std::net::TcpStream::connect(format!("{host}:{port}"))?;
+            let mut ssl_stream = None;
+            let write_obj: Option<&mut (dyn Write)> = match protocol.as_ref() {
+                "https://" => {
+                    let connector = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls())?.build();
+                    ssl_stream = Some(connector.connect(host.as_str(), &stream)?);
+                    Some(ssl_stream.as_mut().unwrap())
+                },
+                _ => {
+                    Some(&mut stream)
+                }
+            };
+
+            let write_obj = write_obj.unwrap();
+
+            write_obj.write_all(request_str.as_bytes())?;
+            write_obj.write_all(request.get_body())?;
+
+            let read_obj: &mut (dyn Read) = match protocol.as_ref() {
+                "https://" => ssl_stream.as_mut().unwrap(),
+                _ => { 
+                    drop(ssl_stream);
+                    &mut stream
+                }
+            };
 
             let mut buffer = [0u8; 1024];
             let mut response_reader = HttpResponseReader::default();
 
             while !response_reader.is_finished() {
-                let buffer_size = stream.read(&mut buffer)?;
+                let buffer_size = read_obj.read(&mut buffer)?;
                 response_reader.read(buffer[0..buffer_size].to_vec())?;
             }
 
-            println!("{}", std::str::from_utf8(&response_reader.get_response().unwrap().get_body())?);
+            //println!("{}", std::str::from_utf8(&response_reader.get_response()?.get_body())?);
 
             Ok(())
         }
@@ -1626,7 +1698,39 @@ mod http_client_tests {
     fn get() {
         let client = web::HttpClient::default();
 
-        client.get("http://www.baidu.com/").unwrap();
+        let mut request = web::HttpRequest::default();
+        request.set_method("POST");
+        request.set_version("HTTP/1.1");
+        request.insert_header("accept", "application/json");
+        request.insert_header("user-agent", "none");
+        //request.insert_header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
+        request.insert_header("cache-control", "no-cache");
+        request.insert_header("pragma", "no-cache");
+        request.insert_header("content-type", "application/json");
+        request.insert_header("authorization", "WECHATPAY2-SHA256-RSA2048 mchid=\"1900000001\",...");
+
+        let json = web::Json::new([
+            ("appid".into(), "wxd678efh567hg6787".into()),
+            ("mchid".into(), "1230000109".into()),
+            ("description".into(), "Image形象店-深圳腾大-QQ公仔".into()),
+            ("out_trade_no".into(), "1217752501201407033233368018".into()),
+            ("notify_url".into(), "https://www.weixin.qq.com/wxpay/pay.php".into()),
+            ("amount".into(), [
+                ("total".into(), 100.into()), 
+                ("currency".into(), "CNY".into())
+            ].into()),
+            ("payer".into(), [
+                ("openid".into(), "oUpF8uMuAJO_M2pxb1Q9zNjWeS6o\t".into())].into()),
+            ("scene_info".into(), [
+                ("payer_client_ip".into(), "14.23.150.211".into()), 
+                ("h5_info".into(), [("type".into(), "iOS".into())].into())
+            ].into()),
+        ].into());
+
+        request.set_body(json.to_string().into());
+        client.send("https://api.mch.weixin.qq.com/v3/pay/transactions/h5", request.clone()).unwrap();
+        client.send("https://www.baidu.com:443", request.clone()).unwrap();
+        client.send("http://www.baidu.com:80/", request).unwrap();
     }
 }
 
