@@ -690,18 +690,16 @@ pub mod web {
             self.header.insert(key.into().to_lowercase(), val.into());
         }
 
-        pub fn get_header(&self, key: &str) -> Option<&String> {
-            self.header.get(&key.to_lowercase())
-        }
-
-        pub fn get_header_keys(&self) -> impl Iterator<Item = &String> {
-            self.header.keys()
+        pub fn get_headers(&self) -> &std::collections::hash_map::HashMap<String, String> {
+            &self.header
         }
 
         pub fn set_body(&mut self, buffer: std::vec::Vec<u8>) {
             self.body = buffer;
 
-            self.insert_header("content-length", self.body.len().to_string());
+            if !self.header.contains_key("transfer-encoding") {
+                self.insert_header("content-length", self.body.len().to_string());
+            }
         }
 
         pub fn get_body(&self) -> &std::vec::Vec<u8> {
@@ -709,7 +707,7 @@ pub mod web {
         }
 
         pub fn get_body_len(&self) -> usize {
-            if let Some(len_str) = self.get_header("content-length") {
+            if let Some(len_str) = self.get_headers().get("content-length") {
                 return str::parse::<usize>(len_str).unwrap()
             }
             else {
@@ -822,7 +820,7 @@ pub mod web {
                 RequestReaderState::Body => {
                     //println!("cache_len:{}",self.cache.len());
                     //println!("in body:{}", urldecode(std::str::from_utf8(self.cache.as_slice())?)?);
-                    if self.cache.len() == self.http_request.get_header("content-length").unwrap().parse::<usize>()? {
+                    if self.cache.len() == self.http_request.get_headers().get("content-length").unwrap().parse::<usize>()? {
                          self.http_request.set_body(std::mem::take(&mut self.cache));
                         self.cur_state = RequestReaderState::End;
                     }
@@ -968,13 +966,16 @@ pub mod web {
             self.header.insert(key.into().to_lowercase(), val.into());
         }
 
-        pub fn get_header(&self) -> std::collections::hash_map::Iter<String, String> {
-            self.header.iter()
+        pub fn get_headers(&self) -> &std::collections::hash_map::HashMap<String, String> {
+            &self.header
         }
 
         pub fn set_body(&mut self, body_byte: std::vec::Vec::<u8>) {
             self.body = body_byte;
-            self.insert_header("content-length", self.body.len().to_string());
+
+            if !self.header.contains_key("transfer-encoding") {
+                self.insert_header("content-length", self.body.len().to_string());
+            }
         }
 
         pub fn get_body(&self) -> &std::vec::Vec::<u8> {
@@ -1072,11 +1073,51 @@ pub mod web {
                     } 
                 },
                 ResponseReaderState::Body => {
-                    let (_key, val) = self.response.get_header().find(|(key, _val)| key.as_str() == "content-length").ok_or(std::io::Error::new(std::io::ErrorKind::Other, "not have content-length"))?;
-                    if self.cache.len() == val.parse::<usize>()? {
-                        self.response.set_body(std::mem::take(&mut self.cache));
-                        self.cur_state = ResponseReaderState::End;
+                    if let Some(content_length) = self.response.get_headers().get("content-length") {
+                        if self.cache.len() == content_length.parse::<usize>()? {
+                            self.response.set_body(std::mem::take(&mut self.cache));
+                            self.cur_state = ResponseReaderState::End;
+                        }
                     }
+                    else if let Some(transfer_encoding) = self.response.get_headers().get("transfer-encoding") {
+                        match transfer_encoding.as_str() {
+                            "chunked" => {
+                                if let Some(len_return_pos) = self.cache.iter().position(|&item| item == b'\r') {
+                                    let chunk_len_hex = &self.cache[..len_return_pos];
+                                    let mut chunk_len: usize = 0;
+                                    for i in 0..chunk_len_hex.len() {
+                                        chunk_len += usize::from_str_radix(&(chunk_len_hex[i] as char).to_string(), 16)? * (16usize.pow((chunk_len_hex.len() - (i + 1)).try_into()?));
+                                    }
+
+
+                                    if chunk_len == 0 {
+                                        self.cur_state = ResponseReaderState::End;
+                                    }
+                                    else {
+                                        if self.cache.len() >= len_return_pos + 2 + chunk_len + 2 {
+                                            self.cache = self.cache[len_return_pos..].to_vec();
+                                            assert_eq!('\r', self.cache[0] as char);
+                                            assert_eq!('\n', self.cache[1] as char);
+                                            self.cache = self.cache[2..].to_vec();
+
+                                            let mut temp = self.response.get_body().clone();
+                                            temp.append(&mut self.cache[..chunk_len].to_vec());
+                                            self.response.set_body(std::mem::take(&mut temp));
+                                            self.cache = self.cache[chunk_len..].to_vec();
+                                            assert_eq!('\r', self.cache[0] as char);
+                                            assert_eq!('\n', self.cache[1] as char);
+                                            self.cache = self.cache[2..].to_vec();
+                                        }
+                                    }
+                                }
+                                else { 
+                                    //return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("chunk not vaild")).into());
+                                }
+                            },
+                            _ => return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("transfer_encoding:{transfer_encoding}")).into()),
+                        }   
+                    }
+                    else { return Err(std::io::Error::new(std::io::ErrorKind::Other, "not have content-length").into()); };
                 },
                 ResponseReaderState::End => {
                     return Err(std::io::Error::new(std::io::ErrorKind::Other, "is finish").into());
@@ -1136,7 +1177,7 @@ pub mod web {
             let func = link.get(url).ok_or(std::io::Error::new(std::io::ErrorKind::Other, "route have not register url"))?;
 
             let def = String::new();
-            let content_type = request.get_header("content-type").unwrap_or(&def);
+            let content_type = request.get_headers().get("content-type").unwrap_or(&def);
 
             let json = if content_type.find("application/json").is_some() { 
                 Json::parse(std::str::from_utf8(request.get_body())?)?
@@ -1168,7 +1209,7 @@ pub mod web {
                                     status_desc = format!("{:?}", response.get_status_code()),
                                     header = (|| {
                                         let mut result = String::new();
-                                        for (key, val) in response.get_header() {
+                                        for (key, val) in response.get_headers().iter() {
                                             result += format!("{}: {}\r\n", key, val).as_str();
                                         }
 
@@ -1289,7 +1330,7 @@ pub mod web {
 
                         //println!("{:#?}", request);
 
-                        if request.get_header("accept-encoding").unwrap_or(&String::new()).split(",").find(|&item| item == "gzip").is_some() {
+                        if request.get_headers().get("accept-encoding").unwrap_or(&String::new()).split(",").find(|&item| item == "gzip").is_some() {
                             //println!("boy use gzip");
                             let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
                             encoder.write_all(response.get_body())?;
@@ -1378,8 +1419,7 @@ pub mod web {
                     uri = request.get_uri(), 
                     query_string = request.get_query_string(),
                     version = request.get_version(),
-                    headers = request.get_header_keys().map(|key| {
-                        let val = request.get_header(key).unwrap();
+                    headers = request.get_headers().iter().map(|(key, val)| {
                         //let mut new_key = key.clone();
                         //new_key.replace_range(0..1, &key.as_str()[0..1].to_uppercase());
                         format!("{key}: {val}\r\n", )
@@ -1387,7 +1427,7 @@ pub mod web {
             )
         }
 
-        pub fn send<T: Into<String>>(&self, address: T, mut request: HttpRequest) -> Result<(), BacktraceError> {
+        pub fn send<T: Into<String>>(&self, address: T, mut request: HttpRequest) -> Result<HttpResponse, BacktraceError> {
             let mut address: String = address.into();
             let host: String;
             let port: String;
@@ -1473,9 +1513,9 @@ pub mod web {
                 response_reader.read(buffer[0..buffer_size].to_vec())?;
             }
 
-            //println!("{}", std::str::from_utf8(&response_reader.get_response()?.get_body())?);
+            let res = response_reader.get_response()?;
 
-            Ok(())
+            Ok(res)
         }
     }
 }
@@ -1693,44 +1733,27 @@ mod request_tests {
 #[cfg(test)]
 mod http_client_tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
-    fn get() {
+    fn test_chunk () {
         let client = web::HttpClient::default();
-
         let mut request = web::HttpRequest::default();
-        request.set_method("POST");
+
+        request.set_method("GET");
         request.set_version("HTTP/1.1");
-        request.insert_header("accept", "application/json");
-        request.insert_header("user-agent", "none");
-        //request.insert_header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
-        request.insert_header("cache-control", "no-cache");
-        request.insert_header("pragma", "no-cache");
-        request.insert_header("content-type", "application/json");
-        request.insert_header("authorization", "WECHATPAY2-SHA256-RSA2048 mchid=\"1900000001\",...");
+        request.insert_header("accept-encoding", "gzip");
+        request.insert_header("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36");
 
-        let json = web::Json::new([
-            ("appid".into(), "wxd678efh567hg6787".into()),
-            ("mchid".into(), "1230000109".into()),
-            ("description".into(), "Image形象店-深圳腾大-QQ公仔".into()),
-            ("out_trade_no".into(), "1217752501201407033233368018".into()),
-            ("notify_url".into(), "https://www.weixin.qq.com/wxpay/pay.php".into()),
-            ("amount".into(), [
-                ("total".into(), 100.into()), 
-                ("currency".into(), "CNY".into())
-            ].into()),
-            ("payer".into(), [
-                ("openid".into(), "oUpF8uMuAJO_M2pxb1Q9zNjWeS6o\t".into())].into()),
-            ("scene_info".into(), [
-                ("payer_client_ip".into(), "14.23.150.211".into()), 
-                ("h5_info".into(), [("type".into(), "iOS".into())].into())
-            ].into()),
-        ].into());
+        let res = client.send("https://www.baidu.com", request).unwrap();
 
-        request.set_body(json.to_string().into());
-        client.send("https://api.mch.weixin.qq.com/v3/pay/transactions/h5", request.clone()).unwrap();
-        client.send("https://www.baidu.com:443", request.clone()).unwrap();
-        client.send("http://www.baidu.com:80/", request).unwrap();
+        let asd = res.get_body();
+
+        let mut gz = flate2::read::GzDecoder::new(asd.as_slice());
+        let mut s = String::new();
+        gz.read_to_string(&mut s).unwrap();
+
+        println!("{s}");
     }
 }
 

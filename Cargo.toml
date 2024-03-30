@@ -12,3 +12,4 @@ futures = "0.3"
 async-std = "1.12.0"
 flate2 = "*"
 openssl = { version = "0.10.64" }
+rand = "*"
