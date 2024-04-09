@@ -745,10 +745,6 @@ pub mod web {
         }
 
         pub fn read(&mut self, mut buf: Vec<u8>) -> Result<&mut Self, BacktraceError> {
-            if self.cur_state == RequestReaderState::Body && buf.len() == 0 {
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, "read body but buf not change").into());
-            }
-
             self.cache.append(&mut buf);
             drop(buf);
 
